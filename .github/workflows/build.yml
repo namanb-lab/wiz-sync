@@ -1,0 +1,401 @@
+name: Build WiZ Sync APK
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/example/wizsync
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "WizSync"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.wizsync"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.wizsync"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.6.1")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+              <application
+                  android:label="WiZ Sync"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:banner="@android:drawable/sym_def_app_icon"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".SyncService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/MainActivity.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.app.Activity
+          import android.content.ActivityNotFoundException
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.Toast
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity() {
+
+              private val capture =
+                  registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                      val d = r.data
+                      if (r.resultCode == Activity.RESULT_OK && d != null) {
+                          val i = Intent(this, SyncService::class.java)
+                              .putExtra("code", r.resultCode)
+                              .putExtra("data", d)
+                          startForegroundService(i)
+                      }
+                  }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val start = Button(this).apply {
+                      text = "Start sync"
+                      textSize = 28f
+                      setOnClickListener {
+                          try {
+                              val mpm = getSystemService(MediaProjectionManager::class.java)
+                              capture.launch(mpm.createScreenCaptureIntent())
+                          } catch (e: ActivityNotFoundException) {
+                              Toast.makeText(
+                                  this@MainActivity,
+                                  "This device has no screen-capture permission dialog",
+                                  Toast.LENGTH_LONG
+                              ).show()
+                          }
+                      }
+                  }
+
+                  val stop = Button(this).apply {
+                      text = "Stop"
+                      textSize = 28f
+                      setOnClickListener { stopService(Intent(this@MainActivity, SyncService::class.java)) }
+                  }
+
+                  setContentView(LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(80, 80, 80, 80)
+                      addView(start)
+                      addView(stop)
+                  })
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/SyncService.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.SystemClock
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+          import java.net.SocketTimeoutException
+
+          class SyncService : Service() {
+
+              // If auto-discovery misses a bulb, add its IP here, e.g. listOf("192.168.1.50", "192.168.1.51")
+              private val manualIps = listOf<String>()
+
+              private var projection: MediaProjection? = null
+              private var display: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+              private var sock: DatagramSocket? = null
+              private var thread: HandlerThread? = null
+              private val bulbs = mutableListOf<InetAddress>()
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
+                  val data = i?.getParcelableExtra<Intent>("data")
+                  if (i == null || data == null) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  startFg("Starting...")
+
+                  val t = HandlerThread("wiz-sync").also { it.start() }
+                  thread = t
+                  val h = Handler(t.looper)
+
+                  val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  projection = mpm.getMediaProjection(i.getIntExtra("code", 0), data).also {
+                      it.registerCallback(object : MediaProjection.Callback() {
+                          override fun onStop() {
+                              stopSelf()
+                          }
+                      }, h)
+                  }
+                  h.post { begin(h) }
+                  return START_NOT_STICKY
+              }
+
+              private fun notif(text: String): Notification {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("sync", "Light sync", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  return Notification.Builder(this, "sync")
+                      .setContentTitle("WiZ sync")
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .build()
+              }
+
+              private fun startFg(text: String) {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, notif(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(1, notif(text))
+                  }
+              }
+
+              // Runs on the worker thread: find bulbs, then start grabbing frames.
+              private fun begin(h: Handler) {
+                  val s = DatagramSocket().apply { broadcast = true; soTimeout = 400 }
+                  sock = s
+                  discover(s)
+                  getSystemService(NotificationManager::class.java)
+                      .notify(1, notif("Syncing ${bulbs.size} bulb(s)"))
+
+                  val dm = resources.displayMetrics
+                  val w = 64
+                  val hh = (w.toFloat() * dm.heightPixels / dm.widthPixels).toInt().coerceAtLeast(8)
+                  val rd = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
+                  reader = rd
+
+                  var sr = -1f
+                  var sg = 0f
+                  var sb = 0f
+                  var last = 0L
+
+                  rd.setOnImageAvailableListener({ r ->
+                      val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val now = SystemClock.uptimeMillis()
+                          if (now - last < 100) return@setOnImageAvailableListener // ~10 updates/sec
+                          last = now
+
+                          val p = img.planes[0]
+                          val b = p.buffer
+                          var rs = 0L
+                          var gs = 0L
+                          var bs = 0L
+                          for (y in 0 until hh) for (x in 0 until w) {
+                              val o = y * p.rowStride + x * p.pixelStride
+                              rs += b.get(o).toInt() and 0xFF
+                              gs += b.get(o + 1).toInt() and 0xFF
+                              bs += b.get(o + 2).toInt() and 0xFF
+                          }
+                          val n = (w * hh).toFloat()
+                          val cr = rs / n
+                          val cg = gs / n
+                          val cb = bs / n
+
+                          // light smoothing so the bulbs don't flicker
+                          if (sr < 0) {
+                              sr = cr; sg = cg; sb = cb
+                          } else {
+                              sr += (cr - sr) * 0.5f
+                              sg += (cg - sg) * 0.5f
+                              sb += (cb - sb) * 0.5f
+                          }
+                          send(s, sr, sg, sb)
+                      } finally {
+                          img.close()
+                      }
+                  }, h)
+
+                  display = projection?.createVirtualDisplay(
+                      "wiz-sync", w, hh, dm.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, rd.surface, null, h
+                  )
+              }
+
+              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float) {
+                  val mx = maxOf(r, g, b)
+                  val dim = (mx / 255f * 100).toInt().coerceIn(10, 100)
+                  // Normalise to full-brightness color; scene brightness goes into "dimming".
+                  val (rr, gg, bb) = if (mx < 8f) {
+                      Triple(255, 255, 255)
+                  } else {
+                      val k = 255f / mx
+                      Triple((r * k).toInt(), (g * k).toInt(), (b * k).toInt())
+                  }
+                  val msg =
+                      """{"method":"setPilot","params":{"state":true,"r":$rr,"g":$gg,"b":$bb,"dimming":$dim}}"""
+                          .toByteArray()
+                  for (ip in bulbs) {
+                      try {
+                          s.send(DatagramPacket(msg, msg.size, ip, 38899))
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              private fun discover(s: DatagramSocket) {
+                  val msg =
+                      """{"method":"registration","params":{"phoneMac":"AAAAAAAAAAAA","register":false,"phoneIp":"1.2.3.4","id":"1"}}"""
+                          .toByteArray()
+                  try {
+                      val bc = InetAddress.getByName("255.255.255.255")
+                      repeat(3) { s.send(DatagramPacket(msg, msg.size, bc, 38899)) }
+                  } catch (e: Exception) {
+                  }
+
+                  val end = SystemClock.uptimeMillis() + 2500
+                  val buf = ByteArray(1024)
+                  while (SystemClock.uptimeMillis() < end) {
+                      try {
+                          val p = DatagramPacket(buf, buf.size)
+                          s.receive(p)
+                          if (p.address !in bulbs) bulbs.add(p.address)
+                      } catch (e: SocketTimeoutException) {
+                      } catch (e: Exception) {
+                          break
+                      }
+                  }
+                  for (ip in manualIps) {
+                      val a = InetAddress.getByName(ip)
+                      if (a !in bulbs) bulbs.add(a)
+                  }
+              }
+
+              override fun onDestroy() {
+                  display?.release()
+                  reader?.close()
+                  projection?.stop()
+                  sock?.close()
+                  thread?.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk wiz-sync.apk
+          gh release delete apk --yes --cleanup-tag || true
+          gh release create apk wiz-sync.apk --target "$GITHUB_SHA" --title "WiZ Sync" --notes "Debug build of the WiZ screen-sync app" --latest
