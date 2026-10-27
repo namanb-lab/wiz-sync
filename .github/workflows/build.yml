@@ -127,13 +127,20 @@ jobs:
           import android.content.Intent
           import android.media.projection.MediaProjectionManager
           import android.os.Bundle
+          import android.view.ViewGroup
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.appcompat.widget.SwitchCompat
 
           class MainActivity : AppCompatActivity() {
+
+              private lateinit var status: TextView
+              private lateinit var bulbList: LinearLayout
 
               private val capture =
                   registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
@@ -151,7 +158,7 @@ jobs:
 
                   val start = Button(this).apply {
                       text = "Start sync"
-                      textSize = 28f
+                      textSize = 18f
                       setOnClickListener {
                           try {
                               val mpm = getSystemService(MediaProjectionManager::class.java)
@@ -168,16 +175,227 @@ jobs:
 
                   val stop = Button(this).apply {
                       text = "Stop"
-                      textSize = 28f
+                      textSize = 18f
                       setOnClickListener { stopService(Intent(this@MainActivity, SyncService::class.java)) }
                   }
 
-                  setContentView(LinearLayout(this).apply {
+                  val rescan = Button(this).apply {
+                      text = "Rescan"
+                      textSize = 18f
+                      setOnClickListener { scan() }
+                  }
+
+                  val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  for (b in listOf(start, stop, rescan)) {
+                      buttons.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  }
+
+                  status = TextView(this).apply {
+                      textSize = 20f
+                      setPadding(0, 32, 0, 16)
+                  }
+                  bulbList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+                  val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(80, 80, 80, 80)
-                      addView(start)
-                      addView(stop)
-                  })
+                      setPadding(48, 48, 48, 48)
+                      addView(buttons)
+                      addView(status)
+                      addView(bulbList)
+                  }
+                  setContentView(ScrollView(this).apply { addView(root) })
+
+                  scan()
+              }
+
+              private fun scan() {
+                  status.text = "Scanning for WiZ bulbs..."
+                  bulbList.removeAllViews()
+                  Thread {
+                      val found = Wiz.discover()
+                      runOnUiThread { render(found) }
+                  }.start()
+              }
+
+              private fun render(found: List<Bulb>) {
+                  bulbList.removeAllViews()
+                  status.text = if (found.isEmpty()) {
+                      "No WiZ bulbs found. Check that the phone/TV is on the same Wi-Fi and that local communication is allowed in the WiZ app."
+                  } else {
+                      "${found.size} WiZ bulb(s) found. Switch on = used in sync."
+                  }
+                  val off = Wiz.disabled(this)
+
+                  found.forEachIndexed { n, b ->
+                      val sw = SwitchCompat(this).apply {
+                          text = "Bulb ${n + 1}  |  ${b.ip}"
+                          textSize = 22f
+                          isChecked = b.key !in off
+                          setOnCheckedChangeListener { _, on -> Wiz.setEnabled(this@MainActivity, b.key, on) }
+                      }
+
+                      val state = when (b.on) {
+                          true -> "On"
+                          false -> "Off"
+                          else -> "?"
+                      }
+                      val signal = if (b.rssi != null) "  |  ${b.rssi} dBm" else ""
+                      val info = TextView(this).apply {
+                          textSize = 15f
+                          text = "MAC: ${b.mac.ifEmpty { "?" }}\n" +
+                              "Model: ${b.model.ifEmpty { "?" }}  |  Firmware: ${b.fw.ifEmpty { "?" }}\n" +
+                              "State: $state$signal"
+                      }
+
+                      val blink = Button(this).apply {
+                          text = "Blink this bulb"
+                          setOnClickListener {
+                              val endOn = b.on != false
+                              Thread { Wiz.blink(b.ip, endOn) }.start()
+                          }
+                      }
+
+                      bulbList.addView(sw)
+                      bulbList.addView(info)
+                      bulbList.addView(blink)
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/Wiz.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.content.Context
+          import android.os.SystemClock
+          import org.json.JSONObject
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+          import java.net.SocketTimeoutException
+
+          data class Bulb(
+              val ip: String,
+              val mac: String,
+              val model: String,
+              val fw: String,
+              val on: Boolean?,
+              val rssi: Int?
+          ) {
+              // Stable id used to remember which bulbs are switched off for sync.
+              val key: String get() = mac.ifEmpty { ip }
+          }
+
+          object Wiz {
+              const val PORT = 38899
+
+              // If auto-discovery misses a bulb, add its IP here, e.g. listOf("192.168.1.50", "192.168.1.51")
+              val manualIps = listOf<String>()
+
+              /** Finds every WiZ bulb on the Wi-Fi and asks each one for its details. Blocks for a few seconds. */
+              fun discover(waitMs: Long = 2500): List<Bulb> {
+                  val ips = linkedSetOf<String>()
+                  val s = DatagramSocket()
+                  try {
+                      s.broadcast = true
+                      s.soTimeout = 400
+                      val msg =
+                          """{"method":"registration","params":{"phoneMac":"AAAAAAAAAAAA","register":false,"phoneIp":"1.2.3.4","id":"1"}}"""
+                              .toByteArray()
+                      try {
+                          val bc = InetAddress.getByName("255.255.255.255")
+                          repeat(3) { s.send(DatagramPacket(msg, msg.size, bc, PORT)) }
+                      } catch (e: Exception) {
+                      }
+                      val end = SystemClock.uptimeMillis() + waitMs
+                      val buf = ByteArray(2048)
+                      while (SystemClock.uptimeMillis() < end) {
+                          try {
+                              val p = DatagramPacket(buf, buf.size)
+                              s.receive(p)
+                              val ip = p.address.hostAddress
+                              if (ip != null) ips.add(ip)
+                          } catch (e: SocketTimeoutException) {
+                          } catch (e: Exception) {
+                              break
+                          }
+                      }
+                  } catch (e: Exception) {
+                  } finally {
+                      s.close()
+                  }
+                  ips.addAll(manualIps)
+                  return ips.map { details(it) }
+                      .sortedBy { it.ip.substringAfterLast('.').toIntOrNull() ?: 0 }
+              }
+
+              private fun details(ip: String): Bulb {
+                  val cfg = ask(ip, "getSystemConfig")
+                  val pilot = ask(ip, "getPilot")
+                  val mac = cfg?.optString("mac").orEmpty()
+                      .ifEmpty { pilot?.optString("mac").orEmpty() }
+                      .lowercase()
+                  return Bulb(
+                      ip = ip,
+                      mac = mac,
+                      model = cfg?.optString("moduleName").orEmpty(),
+                      fw = cfg?.optString("fwVersion").orEmpty(),
+                      on = if (pilot != null && pilot.has("state")) pilot.optBoolean("state") else null,
+                      rssi = if (pilot != null && pilot.has("rssi")) pilot.optInt("rssi") else null
+                  )
+              }
+
+              private fun ask(ip: String, method: String): JSONObject? {
+                  val s = DatagramSocket()
+                  try {
+                      s.soTimeout = 600
+                      val addr = InetAddress.getByName(ip)
+                      val msg = """{"method":"$method","params":{}}""".toByteArray()
+                      val buf = ByteArray(2048)
+                      for (attempt in 1..2) {
+                          s.send(DatagramPacket(msg, msg.size, addr, PORT))
+                          try {
+                              val p = DatagramPacket(buf, buf.size)
+                              s.receive(p)
+                              return JSONObject(String(p.data, 0, p.length)).optJSONObject("result")
+                          } catch (e: SocketTimeoutException) {
+                          }
+                      }
+                  } catch (e: Exception) {
+                  } finally {
+                      s.close()
+                  }
+                  return null
+              }
+
+              /** Flashes one bulb so you can tell which physical bulb it is. endOn = state to leave it in. */
+              fun blink(ip: String, endOn: Boolean) {
+                  val s = DatagramSocket()
+                  try {
+                      val addr = InetAddress.getByName(ip)
+                      val first = !endOn
+                      repeat(3) {
+                          for (state in listOf(first, !first)) {
+                              val m = """{"method":"setPilot","params":{"state":$state}}""".toByteArray()
+                              s.send(DatagramPacket(m, m.size, addr, PORT))
+                              Thread.sleep(350)
+                          }
+                      }
+                  } catch (e: Exception) {
+                  } finally {
+                      s.close()
+                  }
+              }
+
+              // ---- which bulbs are switched off for sync (saved on the device) ----
+
+              fun disabled(ctx: Context): Set<String> =
+                  ctx.getSharedPreferences("wiz", Context.MODE_PRIVATE).getStringSet("off", null) ?: emptySet()
+
+              fun setEnabled(ctx: Context, key: String, enabled: Boolean) {
+                  val set = HashSet(disabled(ctx))
+                  if (enabled) set.remove(key) else set.add(key)
+                  ctx.getSharedPreferences("wiz", Context.MODE_PRIVATE).edit().putStringSet("off", set).apply()
               }
           }
           EOF
@@ -207,7 +425,6 @@ jobs:
           import java.net.DatagramPacket
           import java.net.DatagramSocket
           import java.net.InetAddress
-          import java.net.SocketTimeoutException
           import kotlin.math.pow
 
           class SyncService : Service() {
@@ -221,15 +438,13 @@ jobs:
               private val gainG = 1.0f
               private val gainB = 0.8f
 
-              // If auto-discovery misses a bulb, add its IP here, e.g. listOf("192.168.1.50", "192.168.1.51")
-              private val manualIps = listOf<String>()
-
               private var projection: MediaProjection? = null
               private var display: VirtualDisplay? = null
               private var reader: ImageReader? = null
               private var sock: DatagramSocket? = null
               private var thread: HandlerThread? = null
-              private val bulbs = mutableListOf<InetAddress>()
+              // (bulb id, address) for every bulb found at start; the on/off switches in the app decide who gets colors
+              private var targets: List<Pair<String, InetAddress>> = emptyList()
 
               override fun onBind(i: Intent?): IBinder? = null
 
@@ -266,182 +481,3 @@ jobs:
                       .setContentTitle("WiZ sync")
                       .setContentText(text)
                       .setSmallIcon(android.R.drawable.ic_menu_view)
-                      .build()
-              }
-
-              private fun startFg(text: String) {
-                  if (Build.VERSION.SDK_INT >= 29) {
-                      startForeground(1, notif(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                  } else {
-                      startForeground(1, notif(text))
-                  }
-              }
-
-              // Runs on the worker thread: find bulbs, then start grabbing frames.
-              private fun begin(h: Handler) {
-                  val s = DatagramSocket().apply { broadcast = true; soTimeout = 400 }
-                  sock = s
-                  discover(s)
-                  getSystemService(NotificationManager::class.java)
-                      .notify(1, notif("Syncing ${bulbs.size} bulb(s)"))
-
-                  val dm = resources.displayMetrics
-                  val w = 96
-                  val hh = (w.toFloat() * dm.heightPixels / dm.widthPixels).toInt().coerceAtLeast(8)
-                  val rd = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
-                  reader = rd
-
-                  var sr = -1f
-                  var sg = 0f
-                  var sb = 0f
-                  var sv = -1f
-                  var last = 0L
-
-                  rd.setOnImageAvailableListener({ r ->
-                      val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-                      try {
-                          val now = SystemClock.uptimeMillis()
-                          if (now - last < 100) return@setOnImageAvailableListener // ~10 updates/sec
-                          last = now
-
-                          val p = img.planes[0]
-                          val buf = p.buffer
-                          var wr = 0.0
-                          var wg = 0.0
-                          var wb = 0.0
-                          var ws = 0.0
-                          var vsum = 0.0
-                          for (y in 0 until hh) {
-                              for (x in 0 until w) {
-                                  val o = y * p.rowStride + x * p.pixelStride
-                                  val pr = buf.get(o).toInt() and 0xFF
-                                  val pg = buf.get(o + 1).toInt() and 0xFF
-                                  val pb = buf.get(o + 2).toInt() and 0xFF
-                                  val mx = maxOf(pr, pg, pb)
-                                  vsum += mx
-                                  // Skip near-black pixels (letterbox bars, deep shadows) so they
-                                  // don't wash out the color of the visible scene.
-                                  if (mx < 24) continue
-                                  val mn = minOf(pr, pg, pb)
-                                  val v = mx / 255.0
-                                  val sat = (mx - mn).toDouble() / mx
-                                  // Bright, colorful pixels count the most.
-                                  val wt = v * v * (0.15 + sat)
-                                  wr += pr * wt
-                                  wg += pg * wt
-                                  wb += pb * wt
-                                  ws += wt
-                              }
-                          }
-                          val avgV = (vsum / (w * hh) / 255.0).toFloat()
-
-                          if (ws > 0.0001) {
-                              val cr = (wr / ws).toFloat()
-                              val cg = (wg / ws).toFloat()
-                              val cb = (wb / ws).toFloat()
-                              if (sr < 0) {
-                                  sr = cr; sg = cg; sb = cb
-                              } else {
-                                  sr += (cr - sr) * 0.5f
-                                  sg += (cg - sg) * 0.5f
-                                  sb += (cb - sb) * 0.5f
-                              }
-                          }
-                          sv = if (sv < 0) avgV else sv + (avgV - sv) * 0.5f
-                          if (sr >= 0) send(s, sr, sg, sb, sv)
-                      } finally {
-                          img.close()
-                      }
-                  }, h)
-
-                  display = projection?.createVirtualDisplay(
-                      "wiz-sync", w, hh, dm.densityDpi,
-                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, rd.surface, null, h
-                  )
-              }
-
-              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float, v: Float) {
-                  // Brightness: never below minDim, brighter scenes go up to 100.
-                  val dim = (minDim + (100 - minDim) * v.coerceIn(0f, 1f).pow(gamma)).toInt()
-                      .coerceIn(minDim, 100)
-
-                  val hsv = FloatArray(3)
-                  Color.RGBToHSV(
-                      r.toInt().coerceIn(0, 255),
-                      g.toInt().coerceIn(0, 255),
-                      b.toInt().coerceIn(0, 255),
-                      hsv
-                  )
-
-                  val text = if (hsv[1] < 0.12f) {
-                      // Almost no color in the scene: use the white LEDs instead of a washed-out RGB mix.
-                      """{"method":"setPilot","params":{"state":true,"temp":4500,"dimming":$dim}}"""
-                  } else {
-                      // Keep the scene's hue but send it at full strength with no white component,
-                      // otherwise the bulb's red and blue LEDs overpower green and everything looks pink.
-                      val sat = (hsv[1] * satBoost).coerceIn(minSat, 1f)
-                      val c = Color.HSVToColor(floatArrayOf(hsv[0], sat, 1f))
-                      val rr = (Color.red(c) * gainR).toInt().coerceIn(0, 255)
-                      val gg = (Color.green(c) * gainG).toInt().coerceIn(0, 255)
-                      val bb = (Color.blue(c) * gainB).toInt().coerceIn(0, 255)
-                      """{"method":"setPilot","params":{"state":true,"r":$rr,"g":$gg,"b":$bb,"dimming":$dim}}"""
-                  }
-                  val msg = text.toByteArray()
-                  for (ip in bulbs) {
-                      try {
-                          s.send(DatagramPacket(msg, msg.size, ip, 38899))
-                      } catch (e: Exception) {
-                      }
-                  }
-              }
-
-              private fun discover(s: DatagramSocket) {
-                  val msg =
-                      """{"method":"registration","params":{"phoneMac":"AAAAAAAAAAAA","register":false,"phoneIp":"1.2.3.4","id":"1"}}"""
-                          .toByteArray()
-                  try {
-                      val bc = InetAddress.getByName("255.255.255.255")
-                      repeat(3) { s.send(DatagramPacket(msg, msg.size, bc, 38899)) }
-                  } catch (e: Exception) {
-                  }
-
-                  val end = SystemClock.uptimeMillis() + 2500
-                  val buf = ByteArray(1024)
-                  while (SystemClock.uptimeMillis() < end) {
-                      try {
-                          val p = DatagramPacket(buf, buf.size)
-                          s.receive(p)
-                          if (p.address !in bulbs) bulbs.add(p.address)
-                      } catch (e: SocketTimeoutException) {
-                      } catch (e: Exception) {
-                          break
-                      }
-                  }
-                  for (ip in manualIps) {
-                      val a = InetAddress.getByName(ip)
-                      if (a !in bulbs) bulbs.add(a)
-                  }
-              }
-
-              override fun onDestroy() {
-                  display?.release()
-                  reader?.close()
-                  projection?.stop()
-                  sock?.close()
-                  thread?.quitSafely()
-                  super.onDestroy()
-              }
-          }
-          EOF
-
-      - name: Build APK
-        run: gradle assembleDebug --no-daemon
-
-      - name: Publish APK as a release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk wiz-sync.apk
-          gh release delete apk --yes --cleanup-tag || true
-          gh release create apk wiz-sync.apk --target "$GITHUB_SHA" --title "WiZ Sync" --notes "Debug build of the WiZ screen-sync app" --latest
