@@ -5,7 +5,8 @@ Ambient lighting for your **Philips WiZ** bulbs, with no extra hardware. This An
 > Unofficial project. Not affiliated with or endorsed by Philips, Signify or WiZ.
 >
 > Tested on TCL C6K Mini Led TV and it's work Fine with Youtube Video set to 1080P as some higher quality TV video starts lagging.
-> Tested on Android 17 device and here select any quality as it's not lagging, Depends on Device (Mine is Oppo Find X10)
+> 
+> Tested on Android 17 Android Phone and here select any quality as it's not lagging, Depends on Device 
 
 ## Features
 
