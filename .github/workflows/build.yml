@@ -481,3 +481,159 @@ jobs:
                       .setContentTitle("WiZ sync")
                       .setContentText(text)
                       .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .build()
+              }
+
+              private fun startFg(text: String) {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, notif(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(1, notif(text))
+                  }
+              }
+
+              // Runs on the worker thread: find bulbs, then start grabbing frames.
+              private fun begin(h: Handler) {
+                  val s = DatagramSocket()
+                  sock = s
+                  val found = Wiz.discover()
+                  targets = found.map { it.key to InetAddress.getByName(it.ip) }
+                  val offNow = Wiz.disabled(this)
+                  val active = targets.count { it.first !in offNow }
+                  getSystemService(NotificationManager::class.java)
+                      .notify(1, notif("Syncing $active of ${targets.size} bulb(s)"))
+
+                  val dm = resources.displayMetrics
+                  val w = 96
+                  val hh = (w.toFloat() * dm.heightPixels / dm.widthPixels).toInt().coerceAtLeast(8)
+                  val rd = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
+                  reader = rd
+
+                  var sr = -1f
+                  var sg = 0f
+                  var sb = 0f
+                  var sv = -1f
+                  var last = 0L
+
+                  rd.setOnImageAvailableListener({ r ->
+                      val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val now = SystemClock.uptimeMillis()
+                          if (now - last < 100) return@setOnImageAvailableListener // ~10 updates/sec
+                          last = now
+
+                          val p = img.planes[0]
+                          val buf = p.buffer
+                          var wr = 0.0
+                          var wg = 0.0
+                          var wb = 0.0
+                          var ws = 0.0
+                          var vsum = 0.0
+                          for (y in 0 until hh) {
+                              for (x in 0 until w) {
+                                  val o = y * p.rowStride + x * p.pixelStride
+                                  val pr = buf.get(o).toInt() and 0xFF
+                                  val pg = buf.get(o + 1).toInt() and 0xFF
+                                  val pb = buf.get(o + 2).toInt() and 0xFF
+                                  val mx = maxOf(pr, pg, pb)
+                                  vsum += mx
+                                  // Skip near-black pixels (letterbox bars, deep shadows) so they
+                                  // don't wash out the color of the visible scene.
+                                  if (mx < 24) continue
+                                  val mn = minOf(pr, pg, pb)
+                                  val v = mx / 255.0
+                                  val sat = (mx - mn).toDouble() / mx
+                                  // Bright, colorful pixels count the most.
+                                  val wt = v * v * (0.15 + sat)
+                                  wr += pr * wt
+                                  wg += pg * wt
+                                  wb += pb * wt
+                                  ws += wt
+                              }
+                          }
+                          val avgV = (vsum / (w * hh) / 255.0).toFloat()
+
+                          if (ws > 0.0001) {
+                              val cr = (wr / ws).toFloat()
+                              val cg = (wg / ws).toFloat()
+                              val cb = (wb / ws).toFloat()
+                              if (sr < 0) {
+                                  sr = cr; sg = cg; sb = cb
+                              } else {
+                                  sr += (cr - sr) * 0.5f
+                                  sg += (cg - sg) * 0.5f
+                                  sb += (cb - sb) * 0.5f
+                              }
+                          }
+                          sv = if (sv < 0) avgV else sv + (avgV - sv) * 0.5f
+                          if (sr >= 0) send(s, sr, sg, sb, sv)
+                      } finally {
+                          img.close()
+                      }
+                  }, h)
+
+                  display = projection?.createVirtualDisplay(
+                      "wiz-sync", w, hh, dm.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, rd.surface, null, h
+                  )
+              }
+
+              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float, v: Float) {
+                  // Brightness: never below minDim, brighter scenes go up to 100.
+                  val dim = (minDim + (100 - minDim) * v.coerceIn(0f, 1f).pow(gamma)).toInt()
+                      .coerceIn(minDim, 100)
+
+                  val hsv = FloatArray(3)
+                  Color.RGBToHSV(
+                      r.toInt().coerceIn(0, 255),
+                      g.toInt().coerceIn(0, 255),
+                      b.toInt().coerceIn(0, 255),
+                      hsv
+                  )
+
+                  val text = if (hsv[1] < 0.12f) {
+                      // Almost no color in the scene: use the white LEDs instead of a washed-out RGB mix.
+                      """{"method":"setPilot","params":{"state":true,"temp":4500,"dimming":$dim}}"""
+                  } else {
+                      // Keep the scene's hue but send it at full strength with no white component,
+                      // otherwise the bulb's red and blue LEDs overpower green and everything looks pink.
+                      val sat = (hsv[1] * satBoost).coerceIn(minSat, 1f)
+                      val c = Color.HSVToColor(floatArrayOf(hsv[0], sat, 1f))
+                      val rr = (Color.red(c) * gainR).toInt().coerceIn(0, 255)
+                      val gg = (Color.green(c) * gainG).toInt().coerceIn(0, 255)
+                      val bb = (Color.blue(c) * gainB).toInt().coerceIn(0, 255)
+                      """{"method":"setPilot","params":{"state":true,"r":$rr,"g":$gg,"b":$bb,"dimming":$dim}}"""
+                  }
+                  val msg = text.toByteArray()
+                  val off = Wiz.disabled(this)
+                  for ((key, ip) in targets) {
+                      if (key in off) continue
+                      try {
+                          s.send(DatagramPacket(msg, msg.size, ip, Wiz.PORT))
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              override fun onDestroy() {
+                  display?.release()
+                  reader?.close()
+                  projection?.stop()
+                  sock?.close()
+                  thread?.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk wiz-sync.apk
+          gh release delete apk --yes --cleanup-tag || true
+          gh release create apk wiz-sync.apk --target "$GITHUB_SHA" --title "WiZ Sync" --notes "Debug build of the WiZ screen-sync app" --latest
