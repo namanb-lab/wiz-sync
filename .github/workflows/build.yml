@@ -192,6 +192,7 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.content.pm.ServiceInfo
+          import android.graphics.Color
           import android.graphics.PixelFormat
           import android.hardware.display.DisplayManager
           import android.hardware.display.VirtualDisplay
@@ -207,8 +208,18 @@ jobs:
           import java.net.DatagramSocket
           import java.net.InetAddress
           import java.net.SocketTimeoutException
+          import kotlin.math.pow
 
           class SyncService : Service() {
+
+              // ---- Tuning (edit these, push, rebuild) ----
+              private val minDim = 40        // lowest bulb brightness in %, 10..100
+              private val gamma = 0.6f       // lower = brighter in dark scenes
+              private val satBoost = 2.2f    // higher = more vivid colors
+              private val minSat = 0.7f      // colored scenes never get paler than this (avoids pink wash-out)
+              private val gainR = 1.0f       // per-channel trim; lower gainB if colors still look pink/purple
+              private val gainG = 1.0f
+              private val gainB = 0.8f
 
               // If auto-discovery misses a bulb, add its IP here, e.g. listOf("192.168.1.50", "192.168.1.51")
               private val manualIps = listOf<String>()
@@ -275,7 +286,7 @@ jobs:
                       .notify(1, notif("Syncing ${bulbs.size} bulb(s)"))
 
                   val dm = resources.displayMetrics
-                  val w = 64
+                  val w = 96
                   val hh = (w.toFloat() * dm.heightPixels / dm.widthPixels).toInt().coerceAtLeast(8)
                   val rd = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
                   reader = rd
@@ -283,6 +294,7 @@ jobs:
                   var sr = -1f
                   var sg = 0f
                   var sb = 0f
+                  var sv = -1f
                   var last = 0L
 
                   rd.setOnImageAvailableListener({ r ->
@@ -293,30 +305,50 @@ jobs:
                           last = now
 
                           val p = img.planes[0]
-                          val b = p.buffer
-                          var rs = 0L
-                          var gs = 0L
-                          var bs = 0L
-                          for (y in 0 until hh) for (x in 0 until w) {
-                              val o = y * p.rowStride + x * p.pixelStride
-                              rs += b.get(o).toInt() and 0xFF
-                              gs += b.get(o + 1).toInt() and 0xFF
-                              bs += b.get(o + 2).toInt() and 0xFF
+                          val buf = p.buffer
+                          var wr = 0.0
+                          var wg = 0.0
+                          var wb = 0.0
+                          var ws = 0.0
+                          var vsum = 0.0
+                          for (y in 0 until hh) {
+                              for (x in 0 until w) {
+                                  val o = y * p.rowStride + x * p.pixelStride
+                                  val pr = buf.get(o).toInt() and 0xFF
+                                  val pg = buf.get(o + 1).toInt() and 0xFF
+                                  val pb = buf.get(o + 2).toInt() and 0xFF
+                                  val mx = maxOf(pr, pg, pb)
+                                  vsum += mx
+                                  // Skip near-black pixels (letterbox bars, deep shadows) so they
+                                  // don't wash out the color of the visible scene.
+                                  if (mx < 24) continue
+                                  val mn = minOf(pr, pg, pb)
+                                  val v = mx / 255.0
+                                  val sat = (mx - mn).toDouble() / mx
+                                  // Bright, colorful pixels count the most.
+                                  val wt = v * v * (0.15 + sat)
+                                  wr += pr * wt
+                                  wg += pg * wt
+                                  wb += pb * wt
+                                  ws += wt
+                              }
                           }
-                          val n = (w * hh).toFloat()
-                          val cr = rs / n
-                          val cg = gs / n
-                          val cb = bs / n
+                          val avgV = (vsum / (w * hh) / 255.0).toFloat()
 
-                          // light smoothing so the bulbs don't flicker
-                          if (sr < 0) {
-                              sr = cr; sg = cg; sb = cb
-                          } else {
-                              sr += (cr - sr) * 0.5f
-                              sg += (cg - sg) * 0.5f
-                              sb += (cb - sb) * 0.5f
+                          if (ws > 0.0001) {
+                              val cr = (wr / ws).toFloat()
+                              val cg = (wg / ws).toFloat()
+                              val cb = (wb / ws).toFloat()
+                              if (sr < 0) {
+                                  sr = cr; sg = cg; sb = cb
+                              } else {
+                                  sr += (cr - sr) * 0.5f
+                                  sg += (cg - sg) * 0.5f
+                                  sb += (cb - sb) * 0.5f
+                              }
                           }
-                          send(s, sr, sg, sb)
+                          sv = if (sv < 0) avgV else sv + (avgV - sv) * 0.5f
+                          if (sr >= 0) send(s, sr, sg, sb, sv)
                       } finally {
                           img.close()
                       }
@@ -328,19 +360,33 @@ jobs:
                   )
               }
 
-              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float) {
-                  val mx = maxOf(r, g, b)
-                  val dim = (mx / 255f * 100).toInt().coerceIn(10, 100)
-                  // Normalise to full-brightness color; scene brightness goes into "dimming".
-                  val (rr, gg, bb) = if (mx < 8f) {
-                      Triple(255, 255, 255)
+              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float, v: Float) {
+                  // Brightness: never below minDim, brighter scenes go up to 100.
+                  val dim = (minDim + (100 - minDim) * v.coerceIn(0f, 1f).pow(gamma)).toInt()
+                      .coerceIn(minDim, 100)
+
+                  val hsv = FloatArray(3)
+                  Color.RGBToHSV(
+                      r.toInt().coerceIn(0, 255),
+                      g.toInt().coerceIn(0, 255),
+                      b.toInt().coerceIn(0, 255),
+                      hsv
+                  )
+
+                  val text = if (hsv[1] < 0.12f) {
+                      // Almost no color in the scene: use the white LEDs instead of a washed-out RGB mix.
+                      """{"method":"setPilot","params":{"state":true,"temp":4500,"dimming":$dim}}"""
                   } else {
-                      val k = 255f / mx
-                      Triple((r * k).toInt(), (g * k).toInt(), (b * k).toInt())
-                  }
-                  val msg =
+                      // Keep the scene's hue but send it at full strength with no white component,
+                      // otherwise the bulb's red and blue LEDs overpower green and everything looks pink.
+                      val sat = (hsv[1] * satBoost).coerceIn(minSat, 1f)
+                      val c = Color.HSVToColor(floatArrayOf(hsv[0], sat, 1f))
+                      val rr = (Color.red(c) * gainR).toInt().coerceIn(0, 255)
+                      val gg = (Color.green(c) * gainG).toInt().coerceIn(0, 255)
+                      val bb = (Color.blue(c) * gainB).toInt().coerceIn(0, 255)
                       """{"method":"setPilot","params":{"state":true,"r":$rr,"g":$gg,"b":$bb,"dimming":$dim}}"""
-                          .toByteArray()
+                  }
+                  val msg = text.toByteArray()
                   for (ip in bulbs) {
                       try {
                           s.send(DatagramPacket(msg, msg.size, ip, 38899))
