@@ -1,4 +1,4 @@
-name: Build WiZ Sync APK
+    name: Build WiZ Sync APK
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
 
       - name: Write project files
         run: |
-          mkdir -p app/src/main/java/com/example/wizsync
+          mkdir -p  app app/src/main app/src/main/java/com/example/wizsync app/src/main/res/drawable app/src/main/res/mipmap-anydpi-v26 app/src/main/res/values
 
           cat > settings.gradle.kts <<'EOF'
           pluginManagement {
@@ -69,8 +69,8 @@ jobs:
                   applicationId = "com.example.wizsync"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 3
+                  versionName = "3.0"
               }
 
               compileOptions {
@@ -84,6 +84,7 @@ jobs:
 
           dependencies {
               implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
           }
           EOF
 
@@ -92,16 +93,19 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
               <application
                   android:label="WiZ Sync"
-                  android:icon="@android:drawable/sym_def_app_icon"
-                  android:banner="@android:drawable/sym_def_app_icon"
-                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  android:icon="@mipmap/ic_launcher"
+                  android:banner="@drawable/banner"
+                  android:theme="@style/Theme.WizSync">
 
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
@@ -115,8 +119,87 @@ jobs:
                       android:name=".SyncService"
                       android:exported="false"
                       android:foregroundServiceType="mediaProjection" />
+
+                  <service
+                      android:name=".AnalyzeService"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
+
+                  <service
+                      android:name=".PlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaPlayback" />
               </application>
           </manifest>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.WizSync" parent="Theme.Material3.Dark.NoActionBar">
+                  <item name="colorPrimary">#FF8A3D</item>
+                  <item name="colorOnPrimary">#1B1100</item>
+                  <item name="colorSecondary">#7C5CFF</item>
+                  <item name="colorSurface">#171B30</item>
+                  <item name="colorSurfaceVariant">#20254A</item>
+                  <item name="colorOutline">#3A4066</item>
+                  <item name="android:windowBackground">#0E1020</item>
+                  <item name="android:statusBarColor">#0E1020</item>
+                  <item name="android:navigationBarColor">#0E1020</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_bg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:startColor="#7C5CFF" android:endColor="#FF8A3D" android:angle="315" />
+          </shape>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_fg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:width="62dp" android:height="62dp" android:gravity="center">
+                  <shape android:shape="oval">
+                      <solid android:color="#55FFFFFF" />
+                  </shape>
+              </item>
+              <item android:width="36dp" android:height="36dp" android:gravity="center">
+                  <shape android:shape="oval">
+                      <solid android:color="#FFFFFF" />
+                  </shape>
+              </item>
+          </layer-list>
+          EOF
+
+          cat > app/src/main/res/drawable/banner.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item>
+                  <shape android:shape="rectangle">
+                      <gradient android:startColor="#7C5CFF" android:endColor="#FF8A3D" android:angle="315" />
+                  </shape>
+              </item>
+              <item android:width="84dp" android:height="84dp" android:gravity="center">
+                  <shape android:shape="oval">
+                      <solid android:color="#55FFFFFF" />
+                  </shape>
+              </item>
+              <item android:width="48dp" android:height="48dp" android:gravity="center">
+                  <shape android:shape="oval">
+                      <solid android:color="#FFFFFF" />
+                  </shape>
+              </item>
+          </layer-list>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
           EOF
 
           cat > app/src/main/java/com/example/wizsync/MainActivity.kt <<'EOF'
@@ -125,22 +208,51 @@ jobs:
           import android.app.Activity
           import android.content.ActivityNotFoundException
           import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
           import android.media.projection.MediaProjectionManager
+          import android.net.Uri
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.provider.OpenableColumns
+          import android.view.View
           import android.view.ViewGroup
-          import android.widget.Button
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
-          import androidx.appcompat.widget.SwitchCompat
+          import com.google.android.material.button.MaterialButton
+          import com.google.android.material.button.MaterialButtonToggleGroup
+          import com.google.android.material.materialswitch.MaterialSwitch
+          import com.google.android.material.progressindicator.LinearProgressIndicator
+          import com.google.android.material.slider.Slider
+          import com.google.android.material.tabs.TabLayout
 
           class MainActivity : AppCompatActivity() {
 
-              private lateinit var status: TextView
+              private val ui = Handler(Looper.getMainLooper())
+              private val pages = ArrayList<LinearLayout>()
+
+              private lateinit var bulbStatus: TextView
               private lateinit var bulbList: LinearLayout
+
+              private lateinit var analyzeStatus: TextView
+              private lateinit var analyzeBar: LinearProgressIndicator
+              private lateinit var analyzeBtn: MaterialButton
+              private lateinit var cancelBtn: MaterialButton
+              private lateinit var libList: LinearLayout
+              private lateinit var nowTitle: TextView
+              private lateinit var timeLabel: TextView
+              private lateinit var seek: Slider
+              private lateinit var playBtn: MaterialButton
+
+              private var dragging = false
+              private var libShown = -1
+              private var intervalMs = 500
 
               private val capture =
                   registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
@@ -153,86 +265,152 @@ jobs:
                       }
                   }
 
+              private val pickVideo =
+                  registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                      if (uri != null) startAnalysis(uri)
+                  }
+
+              private val refresher = object : Runnable {
+                  override fun run() {
+                      refreshMovies()
+                      ui.postDelayed(this, 500)
+                  }
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
 
-                  val start = Button(this).apply {
-                      text = "Start sync"
-                      textSize = 18f
-                      setOnClickListener {
-                          try {
-                              val mpm = getSystemService(MediaProjectionManager::class.java)
-                              capture.launch(mpm.createScreenCaptureIntent())
-                          } catch (e: ActivityNotFoundException) {
-                              Toast.makeText(
-                                  this@MainActivity,
-                                  "This device has no screen-capture permission dialog",
-                                  Toast.LENGTH_LONG
-                              ).show()
-                          }
+                  // ---- header ----
+                  val header = LinearLayout(this)
+                  header.orientation = LinearLayout.VERTICAL
+                  header.setPadding(dp(22), dp(24), dp(22), dp(22))
+                  val headerBg = GradientDrawable(
+                      GradientDrawable.Orientation.TL_BR,
+                      intArrayOf(Pal.accent2, Pal.accent)
+                  )
+                  headerBg.cornerRadius = dp(26).toFloat()
+                  header.background = headerBg
+                  header.addView(label("WiZ Sync", 30f, Color.WHITE, true))
+                  header.addView(label("Ambient light for your screen, and for movies you can't capture.", 14f, Color.parseColor("#FFF1E6")))
+                  val headerLp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  headerLp.bottomMargin = dp(10)
+                  header.layoutParams = headerLp
+
+                  // ---- pages ----
+                  pages.add(buildBulbs())
+                  pages.add(buildLive())
+                  pages.add(buildMovies())
+                  pages.add(buildLook())
+
+                  val content = LinearLayout(this)
+                  content.orientation = LinearLayout.VERTICAL
+                  for (p in pages) content.addView(p)
+                  val scroll = ScrollView(this)
+                  scroll.addView(content)
+
+                  // ---- tabs ----
+                  val tabs = TabLayout(this)
+                  tabs.tabMode = TabLayout.MODE_SCROLLABLE
+                  tabs.setBackgroundColor(Color.TRANSPARENT)
+                  tabs.setSelectedTabIndicatorColor(Pal.accent)
+                  tabs.setTabTextColors(Pal.sub, Pal.text)
+                  for (name in listOf("Bulbs", "Live", "Movie lights", "Look")) {
+                      tabs.addTab(tabs.newTab().setText(name))
+                  }
+                  tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+                      override fun onTabSelected(tab: TabLayout.Tab?) {
+                          showPage(tab?.position ?: 0)
                       }
-                  }
 
-                  val stop = Button(this).apply {
-                      text = "Stop"
-                      textSize = 18f
-                      setOnClickListener { stopService(Intent(this@MainActivity, SyncService::class.java)) }
-                  }
+                      override fun onTabUnselected(tab: TabLayout.Tab?) {}
+                      override fun onTabReselected(tab: TabLayout.Tab?) {}
+                  })
 
-                  val rescan = Button(this).apply {
-                      text = "Rescan"
-                      textSize = 18f
-                      setOnClickListener { scan() }
-                  }
+                  val tabsLp = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  tabsLp.bottomMargin = dp(8)
 
-                  val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  for (b in listOf(start, stop, rescan)) {
-                      buttons.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                  }
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(Pal.bg)
+                  root.setPadding(dp(16), dp(16), dp(16), 0)
+                  root.addView(header)
+                  root.addView(tabs, tabsLp)
+                  root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                  setContentView(root)
 
-                  status = TextView(this).apply {
-                      textSize = 20f
-                      setPadding(0, 32, 0, 16)
-                  }
-                  bulbList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(48, 48, 48, 48)
-                      addView(buttons)
-                      addView(status)
-                      addView(bulbList)
-                  }
-                  setContentView(ScrollView(this).apply { addView(root) })
-
+                  showPage(0)
                   scan()
               }
 
+              override fun onResume() {
+                  super.onResume()
+                  ui.post(refresher)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  ui.removeCallbacks(refresher)
+              }
+
+              private fun showPage(index: Int) {
+                  for ((k, p) in pages.withIndex()) {
+                      p.visibility = if (k == index) View.VISIBLE else View.GONE
+                  }
+              }
+
+              private fun toast(s: String) {
+                  Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+              }
+
+              // =====================================================================
+              // Bulbs
+              // =====================================================================
+
+              private fun buildBulbs(): LinearLayout {
+                  val box = card("Your bulbs", "WiZ bulbs found on this Wi-Fi. Switch off any bulb you don't want in the sync.")
+                  bulbStatus = label("", 15f, Pal.sub)
+                  bulbList = LinearLayout(this)
+                  bulbList.orientation = LinearLayout.VERTICAL
+                  box.body.addView(bulbStatus)
+                  box.body.addView(bulbList)
+                  box.body.addView(space(14))
+                  box.body.addView(btn("Rescan", false) { scan() })
+                  return page(box.card)
+              }
+
               private fun scan() {
-                  status.text = "Scanning for WiZ bulbs..."
+                  bulbStatus.text = "Scanning for WiZ bulbs..."
                   bulbList.removeAllViews()
                   Thread {
                       val found = Wiz.discover()
-                      runOnUiThread { render(found) }
+                      runOnUiThread { renderBulbs(found) }
                   }.start()
               }
 
-              private fun render(found: List<Bulb>) {
+              private fun renderBulbs(found: List<Bulb>) {
                   bulbList.removeAllViews()
-                  status.text = if (found.isEmpty()) {
-                      "No WiZ bulbs found. Check that the phone/TV is on the same Wi-Fi and that local communication is allowed in the WiZ app."
+                  bulbStatus.text = if (found.isEmpty()) {
+                      "No WiZ bulbs found. Check that this device is on the same Wi-Fi and that local communication is allowed in the WiZ app."
                   } else {
                       "${found.size} WiZ bulb(s) found. Switch on = used in sync."
                   }
                   val off = Wiz.disabled(this)
 
                   found.forEachIndexed { n, b ->
-                      val sw = SwitchCompat(this).apply {
-                          text = "Bulb ${n + 1}  |  ${b.ip}"
-                          textSize = 22f
-                          isChecked = b.key !in off
-                          setOnCheckedChangeListener { _, on -> Wiz.setEnabled(this@MainActivity, b.key, on) }
-                      }
+                      val t = tile()
+
+                      val sw = MaterialSwitch(this)
+                      sw.text = "Bulb ${n + 1}   ${b.ip}"
+                      sw.textSize = 18f
+                      sw.setTextColor(Pal.text)
+                      sw.isChecked = b.key !in off
+                      sw.setOnCheckedChangeListener { _, on -> Wiz.setEnabled(this, b.key, on) }
 
                       val state = when (b.on) {
                           true -> "On"
@@ -240,24 +418,764 @@ jobs:
                           else -> "?"
                       }
                       val signal = if (b.rssi != null) "  |  ${b.rssi} dBm" else ""
-                      val info = TextView(this).apply {
-                          textSize = 15f
-                          text = "MAC: ${b.mac.ifEmpty { "?" }}\n" +
-                              "Model: ${b.model.ifEmpty { "?" }}  |  Firmware: ${b.fw.ifEmpty { "?" }}\n" +
-                              "State: $state$signal"
+                      val mac = b.mac.ifEmpty { "?" }
+                      val model = b.model.ifEmpty { "?" }
+                      val fw = b.fw.ifEmpty { "?" }
+                      val info = label(
+                          "MAC: $mac\nModel: $model  |  Firmware: $fw\nState: $state$signal",
+                          13f,
+                          Pal.sub
+                      )
+                      info.setPadding(0, dp(6), 0, dp(10))
+
+                      val blink = btn("Blink this bulb", false) {
+                          val endOn = b.on != false
+                          Thread { Wiz.blink(b.ip, endOn) }.start()
                       }
 
-                      val blink = Button(this).apply {
-                          text = "Blink this bulb"
-                          setOnClickListener {
-                              val endOn = b.on != false
-                              Thread { Wiz.blink(b.ip, endOn) }.start()
+                      t.addView(sw)
+                      t.addView(info)
+                      t.addView(blink)
+                      bulbList.addView(t)
+                  }
+              }
+
+              // =====================================================================
+              // Live sync
+              // =====================================================================
+
+              private fun buildLive(): LinearLayout {
+                  val box = card(
+                      "Live screen sync",
+                      "Mirrors this screen's colors onto your bulbs in real time. Great for YouTube and most apps. Protected apps such as Netflix show up black here, so use Movie lights for those."
+                  )
+                  box.body.addView(
+                      row(
+                          btn("Start") { startLive() },
+                          btn("Stop", false) { stopService(Intent(this, SyncService::class.java)) }
+                      )
+                  )
+                  return page(box.card)
+              }
+
+              private fun startLive() {
+                  try {
+                      val mpm = getSystemService(MediaProjectionManager::class.java)
+                      capture.launch(mpm.createScreenCaptureIntent())
+                  } catch (e: ActivityNotFoundException) {
+                      toast("This device has no screen-capture permission dialog")
+                  }
+              }
+
+              // =====================================================================
+              // Movie lights
+              // =====================================================================
+
+              private fun buildMovies(): LinearLayout {
+                  // ---- 1) prepare a movie ----
+                  val a = card(
+                      "Prepare a movie",
+                      "Pick a video file stored on this device. The app reads its colors, moment by moment, and saves them. Later you can play those lights next to the same movie on any screen, even in apps that block screen capture."
+                  )
+                  a.body.addView(label("Detail level", 14f, Pal.sub))
+                  a.body.addView(space(6))
+
+                  val group = MaterialButtonToggleGroup(this)
+                  group.isSingleSelection = true
+                  group.isSelectionRequired = true
+                  var defaultId = View.NO_ID
+                  for ((lbl, ms) in listOf("1 per sec" to 1000, "2 per sec" to 500, "4 per sec" to 250)) {
+                      val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+                      b.text = lbl
+                      b.tag = ms
+                      b.id = View.generateViewId()
+                      group.addView(b)
+                      if (ms == 500) defaultId = b.id
+                  }
+                  group.check(defaultId)
+                  group.addOnButtonCheckedListener { g, checkedId, isChecked ->
+                      if (isChecked) intervalMs = g.findViewById<View>(checkedId).tag as Int
+                  }
+                  a.body.addView(group)
+                  a.body.addView(space(14))
+
+                  analyzeBtn = btn("Choose video and analyze") { chooseVideo() }
+                  a.body.addView(analyzeBtn)
+
+                  analyzeStatus = label("", 13f, Pal.sub)
+                  analyzeStatus.setPadding(0, dp(10), 0, dp(6))
+                  a.body.addView(analyzeStatus)
+
+                  analyzeBar = LinearProgressIndicator(this)
+                  analyzeBar.max = 1000
+                  analyzeBar.visibility = View.GONE
+                  a.body.addView(analyzeBar)
+
+                  cancelBtn = btn("Cancel analysis", false) { Jobs.cancel = true }
+                  cancelBtn.visibility = View.GONE
+                  a.body.addView(cancelBtn)
+
+                  // ---- 2) saved tracks ----
+                  val b = card("Saved tracks", "Light tracks stored on this device.")
+                  libList = LinearLayout(this)
+                  libList.orientation = LinearLayout.VERTICAL
+                  b.body.addView(libList)
+
+                  // ---- 3) play along ----
+                  val p = card(
+                      "Play along",
+                      "Start the movie on your TV and press Play here at the same moment. Use the nudge buttons if the lights run early or late."
+                  )
+                  nowTitle = label("No track loaded", 17f, Pal.text, true)
+                  timeLabel = label("0:00 / 0:00", 14f, Pal.accent, true)
+                  p.body.addView(nowTitle)
+                  p.body.addView(timeLabel)
+
+                  seek = Slider(this)
+                  seek.valueFrom = 0f
+                  seek.valueTo = 1000f
+                  seek.stepSize = 1f
+                  seek.value = 0f
+                  seek.addOnChangeListener { _, v, fromUser ->
+                      val t = Player.track
+                      if (fromUser && t != null) Player.seek((t.durationMs * v / 1000f).toLong())
+                  }
+                  seek.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                      override fun onStartTrackingTouch(slider: Slider) {
+                          dragging = true
+                      }
+
+                      override fun onStopTrackingTouch(slider: Slider) {
+                          dragging = false
+                      }
+                  })
+                  p.body.addView(seek)
+
+                  playBtn = btn("Play") { togglePlay() }
+                  p.body.addView(
+                      row(
+                          playBtn,
+                          btn("Stop", false) {
+                              Player.pause()
+                              Player.seek(0L)
+                              stopService(Intent(this, PlayService::class.java))
                           }
-                      }
+                      )
+                  )
+                  p.body.addView(space(10))
+                  p.body.addView(row(nudge("-60s", -60_000L), nudge("-10s", -10_000L), nudge("+10s", 10_000L), nudge("+60s", 60_000L)))
+                  p.body.addView(space(6))
+                  p.body.addView(row(nudge("-1s", -1_000L), nudge("-0.25s", -250L), nudge("+0.25s", 250L), nudge("+1s", 1_000L)))
 
-                      bulbList.addView(sw)
-                      bulbList.addView(info)
-                      bulbList.addView(blink)
+                  return page(a.card, b.card, p.card)
+              }
+
+              private fun nudge(text: String, deltaMs: Long): MaterialButton {
+                  val b = btn(text, false) { Player.nudge(deltaMs) }
+                  b.textSize = 13f
+                  b.minWidth = 0
+                  b.minimumWidth = 0
+                  b.setPadding(dp(2), dp(8), dp(2), dp(8))
+                  return b
+              }
+
+              private fun chooseVideo() {
+                  if (Jobs.running) {
+                      toast("A video is already being analyzed")
+                      return
+                  }
+                  try {
+                      pickVideo.launch(arrayOf("video/*"))
+                  } catch (e: ActivityNotFoundException) {
+                      toast("This device has no file picker")
+                  }
+              }
+
+              private fun startAnalysis(uri: Uri) {
+                  try {
+                      contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  } catch (e: Exception) {
+                  }
+                  val i = Intent(this, AnalyzeService::class.java)
+                  i.data = uri
+                  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  i.putExtra("name", displayName(uri))
+                  i.putExtra("interval", intervalMs)
+                  startForegroundService(i)
+                  Jobs.message = ""
+              }
+
+              private fun displayName(uri: Uri): String {
+                  var name = "Video"
+                  try {
+                      val c = contentResolver.query(uri, null, null, null, null)
+                      if (c != null) {
+                          if (c.moveToFirst()) {
+                              val ix = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                              if (ix >= 0) name = c.getString(ix).substringBeforeLast('.')
+                          }
+                          c.close()
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return name
+              }
+
+              private fun togglePlay() {
+                  if (Player.track == null) {
+                      toast("Load a saved track first")
+                      return
+                  }
+                  if (Player.playing) {
+                      Player.pause()
+                  } else {
+                      if (!PlayService.running) startForegroundService(Intent(this, PlayService::class.java))
+                      Player.play()
+                  }
+              }
+
+              private fun renderLibrary() {
+                  libList.removeAllViews()
+                  libShown = Jobs.libraryVersion
+                  val items = Tracks.list(this)
+                  if (items.isEmpty()) {
+                      libList.addView(label("Nothing saved yet. Analyze a video first.", 14f, Pal.sub))
+                      return
+                  }
+                  for (t in items) {
+                      val tl = tile()
+                      tl.addView(label(t.name, 16f, Pal.text, true))
+                      val detail = label(
+                          "${fmtDur(t.durationMs)}  |  ${1000 / t.intervalMs} per sec  |  ${t.sizeBytes / 1024} KB",
+                          13f,
+                          Pal.sub
+                      )
+                      detail.setPadding(0, dp(2), 0, dp(10))
+                      tl.addView(detail)
+                      tl.addView(
+                          row(
+                              btn("Use this track") { loadTrack(t.id) },
+                              btn("Delete", false) { deleteTrack(t.id) }
+                          )
+                      )
+                      libList.addView(tl)
+                  }
+              }
+
+              private fun loadTrack(id: String) {
+                  val t = Tracks.load(this, id)
+                  if (t == null) {
+                      toast("Could not open that track")
+                  } else {
+                      Player.load(t)
+                      toast("Loaded: ${t.name}")
+                  }
+              }
+
+              private fun deleteTrack(id: String) {
+                  if (Player.track?.id == id) {
+                      Player.clear()
+                      stopService(Intent(this, PlayService::class.java))
+                  }
+                  Tracks.delete(this, id)
+                  renderLibrary()
+              }
+
+              /** Called twice a second while the screen is open. */
+              private fun refreshMovies() {
+                  if (Jobs.running) {
+                      val p = Jobs.progress
+                      val elapsed = (SystemClock.elapsedRealtime() - Jobs.startedAt) / 1000f
+                      val eta = if (p > 0.02f) "  |  about ${fmtDur(((elapsed / p - elapsed) * 1000).toLong())} left" else ""
+                      analyzeStatus.text = "Analyzing ${Jobs.title}: ${(p * 100).toInt()}%$eta"
+                      analyzeBar.visibility = View.VISIBLE
+                      analyzeBar.setProgressCompat((p * 1000).toInt(), true)
+                      cancelBtn.visibility = View.VISIBLE
+                      analyzeBtn.isEnabled = false
+                  } else {
+                      analyzeStatus.text = Jobs.message
+                      analyzeBar.visibility = View.GONE
+                      cancelBtn.visibility = View.GONE
+                      analyzeBtn.isEnabled = true
+                  }
+
+                  if (libShown != Jobs.libraryVersion) renderLibrary()
+
+                  val t = Player.track
+                  if (t == null) {
+                      nowTitle.text = "No track loaded"
+                      timeLabel.text = "0:00 / 0:00"
+                  } else {
+                      nowTitle.text = t.name
+                      val pos = Player.position()
+                      timeLabel.text = "${fmtDur(pos)} / ${fmtDur(t.durationMs)}"
+                      if (!dragging) {
+                          val permille = pos * 1000L / maxOf(t.durationMs, 1L)
+                          seek.value = permille.toFloat().coerceIn(0f, 1000f)
+                      }
+                  }
+                  playBtn.text = if (Player.playing) "Pause" else "Play"
+              }
+
+              // =====================================================================
+              // Look (saturation, brightness, color trim)
+              // =====================================================================
+
+              private fun buildLook(): LinearLayout {
+                  val box = card(
+                      "Color and brightness",
+                      "Fine-tune how scene colors become bulb colors. Changes apply right away to live sync and movie lights."
+                  )
+
+                  // Preview dots: how a few typical scene colors will come out on the bulbs.
+                  val samples = listOf(
+                      floatArrayOf(235f, 130f, 40f),
+                      floatArrayOf(70f, 120f, 80f),
+                      floatArrayOf(60f, 90f, 190f),
+                      floatArrayOf(190f, 70f, 90f),
+                      floatArrayOf(150f, 150f, 150f)
+                  )
+                  val dotRow = LinearLayout(this)
+                  dotRow.orientation = LinearLayout.HORIZONTAL
+                  val dotBgs = ArrayList<GradientDrawable>()
+                  for (s in samples) {
+                      val dot = View(this)
+                      val bg = GradientDrawable()
+                      bg.shape = GradientDrawable.OVAL
+                      dot.background = bg
+                      val lp = LinearLayout.LayoutParams(dp(44), dp(44))
+                      lp.marginEnd = dp(12)
+                      dotRow.addView(dot, lp)
+                      dotBgs.add(bg)
+                  }
+                  fun refreshDots() {
+                      for ((k, s) in samples.withIndex()) {
+                          dotBgs[k].setColor(Look.preview(this, s[0], s[1], s[2]))
+                      }
+                  }
+                  refreshDots()
+                  box.body.addView(label("Preview: fire, forest, blue, rose, gray scenes", 13f, Pal.sub))
+                  box.body.addView(space(8))
+                  box.body.addView(dotRow)
+                  box.body.addView(space(8))
+
+                  fun add(title: String, key: String, from: Int, to: Int) {
+                      box.body.addView(
+                          sliderRow(title, from, to, Look.get(this, key), { "$it%" }) { v ->
+                              Look.set(this, key, v)
+                              refreshDots()
+                          }
+                      )
+                  }
+                  add("Minimum brightness", Look.K_MIN_DIM, 10, 100)
+                  add("Dark-scene boost", Look.K_BOOST, 0, 100)
+                  add("Color saturation", Look.K_SAT, 0, 100)
+                  add("Minimum color strength", Look.K_MIN_SAT, 0, 100)
+                  add("Red level", Look.K_R, 40, 100)
+                  add("Green level", Look.K_G, 40, 100)
+                  add("Blue level", Look.K_B, 40, 100)
+
+                  box.body.addView(space(14))
+                  box.body.addView(btn("Reset to defaults", false) {
+                      Look.reset(this)
+                      recreate()
+                  })
+                  return page(box.card)
+              }
+
+              override fun onDestroy() {
+                  ui.removeCallbacksAndMessages(null)
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/Ui.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import com.google.android.material.button.MaterialButton
+          import com.google.android.material.card.MaterialCardView
+          import com.google.android.material.slider.Slider
+
+          object Pal {
+              val bg = Color.parseColor("#0E1020")
+              val card = Color.parseColor("#171B30")
+              val tile = Color.parseColor("#20254A")
+              val stroke = Color.parseColor("#2A3057")
+              val text = Color.parseColor("#F2F3FA")
+              val sub = Color.parseColor("#9AA0C3")
+              val accent = Color.parseColor("#FF8A3D")
+              val accent2 = Color.parseColor("#7C5CFF")
+          }
+
+          fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+          fun fmtDur(ms: Long): String {
+              val s = ms / 1000
+              val h = s / 3600
+              val m = (s % 3600) / 60
+              val sec = s % 60
+              return if (h > 0) String.format("%d:%02d:%02d", h, m, sec) else String.format("%d:%02d", m, sec)
+          }
+
+          fun Context.label(text: String, size: Float, color: Int = Pal.text, bold: Boolean = false): TextView {
+              val t = TextView(this)
+              t.text = text
+              t.textSize = size
+              t.setTextColor(color)
+              if (bold) t.setTypeface(t.typeface, Typeface.BOLD)
+              return t
+          }
+
+          class CardBox(val card: MaterialCardView, val body: LinearLayout)
+
+          /** A rounded dark card with a title (and optional explanation) at the top. */
+          fun Context.card(title: String, subtitle: String? = null): CardBox {
+              val body = LinearLayout(this)
+              body.orientation = LinearLayout.VERTICAL
+              body.setPadding(dp(20), dp(18), dp(20), dp(18))
+
+              val c = MaterialCardView(this)
+              c.setRadius(dp(22).toFloat())
+              c.setCardBackgroundColor(Pal.card)
+              c.setCardElevation(0f)
+              c.setStrokeColor(Pal.stroke)
+              c.setStrokeWidth(dp(1))
+              val lp = LinearLayout.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.WRAP_CONTENT
+              )
+              lp.bottomMargin = dp(14)
+              c.layoutParams = lp
+              c.addView(body)
+
+              body.addView(label(title, 19f, Pal.text, true))
+              if (subtitle != null) {
+                  val s = label(subtitle, 13f, Pal.sub)
+                  s.setPadding(0, dp(4), 0, dp(10))
+                  body.addView(s)
+              }
+              return CardBox(c, body)
+          }
+
+          /** A smaller rounded block inside a card (one bulb, one saved track). */
+          fun Context.tile(): LinearLayout {
+              val t = LinearLayout(this)
+              t.orientation = LinearLayout.VERTICAL
+              t.setPadding(dp(16), dp(12), dp(16), dp(12))
+              val bg = GradientDrawable()
+              bg.setColor(Pal.tile)
+              bg.cornerRadius = dp(16).toFloat()
+              t.background = bg
+              val lp = LinearLayout.LayoutParams(
+                  ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.WRAP_CONTENT
+              )
+              lp.topMargin = dp(10)
+              t.layoutParams = lp
+              return t
+          }
+
+          fun Context.btn(text: String, primary: Boolean = true, onClick: () -> Unit): MaterialButton {
+              val b = if (primary) {
+                  MaterialButton(this)
+              } else {
+                  MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+              }
+              b.text = text
+              b.setCornerRadius(dp(14))
+              b.setOnClickListener { onClick() }
+              return b
+          }
+
+          fun Context.space(h: Int): View {
+              val v = View(this)
+              v.layoutParams = LinearLayout.LayoutParams(1, dp(h))
+              return v
+          }
+
+          /** Puts the given views side by side with equal widths. */
+          fun Context.row(vararg views: View): LinearLayout {
+              val r = LinearLayout(this)
+              r.orientation = LinearLayout.HORIZONTAL
+              for ((i, v) in views.withIndex()) {
+                  val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  if (i > 0) lp.marginStart = dp(8)
+                  r.addView(v, lp)
+              }
+              return r
+          }
+
+          fun Context.page(vararg views: View): LinearLayout {
+              val p = LinearLayout(this)
+              p.orientation = LinearLayout.VERTICAL
+              for (v in views) p.addView(v)
+              return p
+          }
+
+          /** A titled slider with its current value on the right. Whole numbers only. */
+          fun Context.sliderRow(
+              title: String,
+              from: Int,
+              to: Int,
+              initial: Int,
+              fmt: (Int) -> String,
+              onChange: (Int) -> Unit
+          ): LinearLayout {
+              val head = label(title, 15f, Pal.text)
+              val valueLabel = label(fmt(initial), 15f, Pal.accent, true)
+
+              val top = LinearLayout(this)
+              top.orientation = LinearLayout.HORIZONTAL
+              top.addView(head, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+              top.addView(valueLabel)
+
+              val slider = Slider(this)
+              slider.valueFrom = from.toFloat()
+              slider.valueTo = to.toFloat()
+              slider.stepSize = 1f
+              slider.value = initial.coerceIn(from, to).toFloat()
+              slider.addOnChangeListener { _, v, fromUser ->
+                  valueLabel.text = fmt(v.toInt())
+                  if (fromUser) onChange(v.toInt())
+              }
+
+              val box = LinearLayout(this)
+              box.orientation = LinearLayout.VERTICAL
+              box.setPadding(0, dp(8), 0, dp(2))
+              box.addView(top)
+              box.addView(slider)
+              return box
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/Look.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.pm.ServiceInfo
+          import android.graphics.Color
+          import android.os.Build
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+          import kotlin.math.pow
+
+          /** Works out the "scene color" of one frame from a stream of pixels. */
+          class Accum {
+              private var wr = 0.0
+              private var wg = 0.0
+              private var wb = 0.0
+              private var ws = 0.0
+              private var vsum = 0.0
+              private var n = 0
+
+              fun reset() {
+                  wr = 0.0
+                  wg = 0.0
+                  wb = 0.0
+                  ws = 0.0
+                  vsum = 0.0
+                  n = 0
+              }
+
+              fun add(pr: Int, pg: Int, pb: Int) {
+                  val mx = maxOf(pr, pg, pb)
+                  vsum += mx
+                  n++
+                  // Skip near-black pixels (letterbox bars, deep shadows) so they don't wash out the scene.
+                  if (mx < 24) return
+                  val mn = minOf(pr, pg, pb)
+                  val v = mx / 255.0
+                  val sat = (mx - mn).toDouble() / mx
+                  // Bright, colorful pixels count the most.
+                  val wt = v * v * (0.15 + sat)
+                  wr += pr * wt
+                  wg += pg * wt
+                  wb += pb * wt
+                  ws += wt
+              }
+
+              /** [r, g, b, brightness], each 0..255. r = g = b = 0 means "no usable color in this frame". */
+              fun result(): IntArray {
+                  val v = if (n > 0) (vsum / n).toInt().coerceIn(0, 255) else 0
+                  if (ws < 0.0001) return intArrayOf(0, 0, 0, v)
+                  return intArrayOf(
+                      (wr / ws).toInt().coerceIn(0, 255),
+                      (wg / ws).toInt().coerceIn(0, 255),
+                      (wb / ws).toInt().coerceIn(0, 255),
+                      v
+                  )
+              }
+          }
+
+          data class LookParams(
+              val minDim: Int,
+              val gamma: Float,
+              val satBoost: Float,
+              val minSat: Float,
+              val gainR: Float,
+              val gainG: Float,
+              val gainB: Float
+          )
+
+          /** Color and brightness settings. The sliders in the app write these; live sync and movie lights read them. */
+          object Look {
+              const val K_MIN_DIM = "minDim"   // 10..100 %
+              const val K_BOOST = "boost"      // 0..100  (dark-scene boost)
+              const val K_SAT = "sat"          // 0..100  (saturation boost)
+              const val K_MIN_SAT = "minSat"   // 0..100 %
+              const val K_R = "gainR"          // 40..100 %
+              const val K_G = "gainG"
+              const val K_B = "gainB"
+
+              private val defaults = mapOf(
+                  K_MIN_DIM to 40, K_BOOST to 57, K_SAT to 60, K_MIN_SAT to 70,
+                  K_R to 100, K_G to 100, K_B to 80
+              )
+
+              private fun prefs(ctx: Context) = ctx.getSharedPreferences("look", Context.MODE_PRIVATE)
+
+              fun get(ctx: Context, key: String): Int = prefs(ctx).getInt(key, defaults.getValue(key))
+
+              fun set(ctx: Context, key: String, value: Int) {
+                  prefs(ctx).edit().putInt(key, value).apply()
+              }
+
+              fun reset(ctx: Context) {
+                  prefs(ctx).edit().clear().apply()
+              }
+
+              fun params(ctx: Context): LookParams = LookParams(
+                  minDim = get(ctx, K_MIN_DIM).coerceIn(10, 100),
+                  gamma = 1f - 0.7f * get(ctx, K_BOOST) / 100f,
+                  satBoost = 1f + 2f * get(ctx, K_SAT) / 100f,
+                  minSat = get(ctx, K_MIN_SAT).coerceIn(0, 100) / 100f,
+                  gainR = get(ctx, K_R) / 100f,
+                  gainG = get(ctx, K_G) / 100f,
+                  gainB = get(ctx, K_B) / 100f
+              )
+
+              class Out(val white: Boolean, val r: Int, val g: Int, val b: Int, val dim: Int)
+
+              /** Turns a scene color (0..255 each) and brightness (0..1) into what the bulb is told. */
+              fun compute(p: LookParams, r: Float, g: Float, b: Float, v: Float): Out {
+                  val dim = (p.minDim + (100 - p.minDim) * v.coerceIn(0f, 1f).pow(p.gamma)).toInt()
+                      .coerceIn(p.minDim, 100)
+
+                  val hsv = FloatArray(3)
+                  Color.RGBToHSV(
+                      r.toInt().coerceIn(0, 255),
+                      g.toInt().coerceIn(0, 255),
+                      b.toInt().coerceIn(0, 255),
+                      hsv
+                  )
+
+                  // Almost no color in the scene: use the white LEDs instead of a washed-out RGB mix.
+                  if (hsv[1] < 0.12f) return Out(true, 255, 255, 255, dim)
+
+                  // Keep the hue but send it at full strength with no white component, otherwise the bulb's
+                  // red and blue LEDs overpower green and everything looks pink.
+                  val sat = (hsv[1] * p.satBoost).coerceIn(p.minSat, 1f)
+                  val c = Color.HSVToColor(floatArrayOf(hsv[0], sat, 1f))
+                  return Out(
+                      false,
+                      (Color.red(c) * p.gainR).toInt().coerceIn(0, 255),
+                      (Color.green(c) * p.gainG).toInt().coerceIn(0, 255),
+                      (Color.blue(c) * p.gainB).toInt().coerceIn(0, 255),
+                      dim
+                  )
+              }
+
+              fun json(o: Out): String =
+                  if (o.white) {
+                      """{"method":"setPilot","params":{"state":true,"temp":4500,"dimming":${o.dim}}}"""
+                  } else {
+                      """{"method":"setPilot","params":{"state":true,"r":${o.r},"g":${o.g},"b":${o.b},"dimming":${o.dim}}}"""
+                  }
+
+              /** The color a bulb would show for a given scene color, for the preview dots. */
+              fun preview(ctx: Context, r: Float, g: Float, b: Float): Int {
+                  val o = compute(params(ctx), r, g, b, 1f)
+                  return if (o.white) Color.rgb(255, 244, 229) else Color.rgb(o.r, o.g, o.b)
+              }
+          }
+
+          /** Finds the bulbs once, then sends colors to the ones that are switched on in the app. */
+          class Sender(private val ctx: Context) {
+              private val sock = DatagramSocket()
+              private var targets: List<Pair<String, InetAddress>> = emptyList()
+
+              /** Scans for bulbs (takes a few seconds). Returns how many are switched on for sync. */
+              fun refresh(): Int {
+                  targets = Wiz.discover().map { it.key to InetAddress.getByName(it.ip) }
+                  return active()
+              }
+
+              fun active(): Int {
+                  val off = Wiz.disabled(ctx)
+                  return targets.count { it.first !in off }
+              }
+
+              fun total(): Int = targets.size
+
+              fun send(r: Float, g: Float, b: Float, v: Float) {
+                  val out = compute(r, g, b, v)
+                  val msg = Look.json(out).toByteArray()
+                  val off = Wiz.disabled(ctx)
+                  for ((key, ip) in targets) {
+                      if (key in off) continue
+                      try {
+                          sock.send(DatagramPacket(msg, msg.size, ip, Wiz.PORT))
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              private fun compute(r: Float, g: Float, b: Float, v: Float): Look.Out =
+                  Look.compute(Look.params(ctx), r, g, b, v)
+
+              fun close() {
+                  sock.close()
+              }
+          }
+
+          object Notif {
+              private const val CH = "sync"
+
+              fun build(ctx: Context, text: String): Notification {
+                  val nm = ctx.getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel(CH, "WiZ Sync", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  return Notification.Builder(ctx, CH)
+                      .setContentTitle("WiZ Sync")
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .build()
+              }
+
+              fun update(ctx: Context, id: Int, text: String) {
+                  ctx.getSystemService(NotificationManager::class.java).notify(id, build(ctx, text))
+              }
+
+              fun startFg(s: Service, id: Int, text: String, type: Int) {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      s.startForeground(id, build(s, text), type)
+                  } else {
+                      s.startForeground(id, build(s, text))
                   }
               }
           }
@@ -400,51 +1318,404 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/java/com/example/wizsync/Tracks.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.content.Context
+          import android.os.SystemClock
+          import java.io.BufferedInputStream
+          import java.io.BufferedOutputStream
+          import java.io.DataInputStream
+          import java.io.DataOutputStream
+          import java.io.File
+          import java.io.FileInputStream
+          import java.io.FileOutputStream
+
+          /** One saved color track: 4 bytes (r, g, b, brightness) for every intervalMs of the video. */
+          class Track(
+              val id: String,
+              val name: String,
+              val intervalMs: Int,
+              val durationMs: Long,
+              val data: ByteArray
+          ) {
+              val count: Int get() = data.size / 4
+
+              /** Fills out[0..3] = r, g, b, brightness (0..255), blended between the two nearest samples. */
+              fun colorAt(posMs: Long, out: FloatArray) {
+                  if (count == 0) return
+                  val t = posMs.toDouble() / intervalMs
+                  val i0 = t.toInt().coerceIn(0, count - 1)
+                  val i1 = (i0 + 1).coerceAtMost(count - 1)
+                  val f = (t - i0).toFloat().coerceIn(0f, 1f)
+                  for (k in 0 until 4) {
+                      val a = data[i0 * 4 + k].toInt() and 0xFF
+                      val b = data[i1 * 4 + k].toInt() and 0xFF
+                      out[k] = a + (b - a) * f
+                  }
+              }
+          }
+
+          class TrackInfo(
+              val id: String,
+              val name: String,
+              val intervalMs: Int,
+              val durationMs: Long,
+              val sizeBytes: Long
+          )
+
+          /** Saved tracks live in the app's private storage on this device. */
+          object Tracks {
+              private const val MAGIC = 0x575A4331
+
+              private fun dir(ctx: Context): File {
+                  val d = File(ctx.filesDir, "tracks")
+                  d.mkdirs()
+                  return d
+              }
+
+              fun save(ctx: Context, name: String, intervalMs: Int, durationMs: Long, data: ByteArray): String {
+                  val id = System.currentTimeMillis().toString()
+                  DataOutputStream(BufferedOutputStream(FileOutputStream(File(dir(ctx), "$id.wzc")))).use { o ->
+                      o.writeInt(MAGIC)
+                      o.writeInt(intervalMs)
+                      o.writeLong(durationMs)
+                      o.writeInt(data.size / 4)
+                      o.writeUTF(name)
+                      o.write(data)
+                  }
+                  return id
+              }
+
+              fun list(ctx: Context): List<TrackInfo> {
+                  val files = dir(ctx).listFiles()?.filter { it.name.endsWith(".wzc") } ?: return emptyList()
+                  val out = ArrayList<TrackInfo>()
+                  for (f in files) {
+                      try {
+                          DataInputStream(BufferedInputStream(FileInputStream(f))).use { i ->
+                              if (i.readInt() == MAGIC) {
+                                  val interval = i.readInt()
+                                  val dur = i.readLong()
+                                  i.readInt()
+                                  val name = i.readUTF()
+                                  out.add(TrackInfo(f.name.removeSuffix(".wzc"), name, interval, dur, f.length()))
+                              }
+                          }
+                      } catch (e: Exception) {
+                      }
+                  }
+                  return out.sortedByDescending { it.id }
+              }
+
+              fun load(ctx: Context, id: String): Track? {
+                  return try {
+                      DataInputStream(BufferedInputStream(FileInputStream(File(dir(ctx), "$id.wzc")))).use { i ->
+                          if (i.readInt() != MAGIC) {
+                              null
+                          } else {
+                              val interval = i.readInt()
+                              val dur = i.readLong()
+                              val count = i.readInt()
+                              val name = i.readUTF()
+                              val data = ByteArray(count * 4)
+                              i.readFully(data)
+                              fillGaps(data)
+                              Track(id, name, interval, dur, data)
+                          }
+                      }
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
+              fun delete(ctx: Context, id: String) {
+                  File(dir(ctx), "$id.wzc").delete()
+              }
+
+              private fun hasColor(d: ByteArray, i: Int): Boolean {
+                  val o = i * 4
+                  return d[o].toInt() != 0 || d[o + 1].toInt() != 0 || d[o + 2].toInt() != 0
+              }
+
+              private fun copyColor(d: ByteArray, from: Int, to: Int) {
+                  d[to * 4] = d[from * 4]
+                  d[to * 4 + 1] = d[from * 4 + 1]
+                  d[to * 4 + 2] = d[from * 4 + 2]
+              }
+
+              /** Dark frames have no color; they keep the last real color so the light doesn't jump. */
+              private fun fillGaps(d: ByteArray) {
+                  val n = d.size / 4
+                  var first = -1
+                  for (i in 0 until n) {
+                      if (hasColor(d, i)) {
+                          first = i
+                          break
+                      }
+                  }
+                  if (first < 0) return
+                  for (i in 0 until first) copyColor(d, first, i)
+                  var last = first
+                  for (i in first until n) {
+                      if (hasColor(d, i)) {
+                          last = i
+                      } else {
+                          copyColor(d, last, i)
+                      }
+                  }
+              }
+          }
+
+          /** The "movie lights" clock. The app screen and the play service both use this. */
+          object Player {
+              @Volatile var track: Track? = null
+              @Volatile var playing = false
+              private var baseMs = 0L
+              private var baseWall = 0L
+
+              private fun now(): Long = SystemClock.elapsedRealtime()
+              private fun dur(): Long = track?.durationMs ?: 0L
+
+              @Synchronized
+              fun position(): Long {
+                  val p = if (playing) baseMs + (now() - baseWall) else baseMs
+                  return p.coerceIn(0L, dur())
+              }
+
+              @Synchronized
+              fun seek(ms: Long) {
+                  baseMs = ms.coerceIn(0L, dur())
+                  baseWall = now()
+              }
+
+              @Synchronized
+              fun nudge(deltaMs: Long) {
+                  seek(position() + deltaMs)
+              }
+
+              @Synchronized
+              fun play() {
+                  if (baseMs >= dur()) baseMs = 0L
+                  baseWall = now()
+                  playing = true
+              }
+
+              @Synchronized
+              fun pause() {
+                  baseMs = position()
+                  playing = false
+              }
+
+              @Synchronized
+              fun load(t: Track) {
+                  track = t
+                  baseMs = 0L
+                  baseWall = now()
+                  playing = false
+              }
+
+              @Synchronized
+              fun clear() {
+                  track = null
+                  playing = false
+                  baseMs = 0L
+              }
+          }
+
+          /** State of the video analysis job, shared between the service and the screen. */
+          object Jobs {
+              @Volatile var running = false
+              @Volatile var cancel = false
+              @Volatile var progress = 0f
+              @Volatile var title = ""
+              @Volatile var startedAt = 0L
+              @Volatile var message = ""
+              @Volatile var libraryVersion = 0
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/Analyzer.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.content.Context
+          import android.graphics.ImageFormat
+          import android.media.Image
+          import android.media.MediaCodec
+          import android.media.MediaCodecInfo
+          import android.media.MediaExtractor
+          import android.media.MediaFormat
+          import android.net.Uri
+          import java.io.ByteArrayOutputStream
+
+          /** Decodes a video file from start to end and records its scene color every few hundred milliseconds. */
+          object Analyzer {
+              class Result(val data: ByteArray, val durationMs: Long)
+
+              fun run(ctx: Context, uri: Uri, intervalMs: Int, onProgress: (Float) -> Unit): Result? {
+                  val ex = MediaExtractor()
+                  var codec: MediaCodec? = null
+                  try {
+                      ex.setDataSource(ctx, uri, null)
+                      var vi = -1
+                      for (i in 0 until ex.trackCount) {
+                          val m = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME)
+                          if (m != null && m.startsWith("video/")) {
+                              vi = i
+                              break
+                          }
+                      }
+                      if (vi < 0) return null
+                      ex.selectTrack(vi)
+                      val fmt = ex.getTrackFormat(vi)
+                      val mime = fmt.getString(MediaFormat.KEY_MIME) ?: return null
+                      val durUs = if (fmt.containsKey(MediaFormat.KEY_DURATION)) fmt.getLong(MediaFormat.KEY_DURATION) else 0L
+                      fmt.setInteger(
+                          MediaFormat.KEY_COLOR_FORMAT,
+                          MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                      )
+
+                      val c = MediaCodec.createDecoderByType(mime)
+                      codec = c
+                      c.configure(fmt, null, null, 0)
+                      c.start()
+
+                      val info = MediaCodec.BufferInfo()
+                      val intervalUs = intervalMs * 1000L
+                      val acc = Accum()
+                      val out = ByteArrayOutputStream()
+                      var nextUs = 0L
+                      var inDone = false
+                      var outDone = false
+                      var failed = false
+                      var idle = 0
+
+                      while (!outDone && !Jobs.cancel) {
+                          if (!inDone) {
+                              val ii = c.dequeueInputBuffer(10_000)
+                              if (ii >= 0) {
+                                  val buf = c.getInputBuffer(ii)
+                                  val n = if (buf != null) ex.readSampleData(buf, 0) else -1
+                                  if (n < 0) {
+                                      c.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                      inDone = true
+                                  } else {
+                                      c.queueInputBuffer(ii, 0, n, ex.sampleTime, 0)
+                                      ex.advance()
+                                  }
+                              }
+                          }
+
+                          val oi = c.dequeueOutputBuffer(info, 10_000)
+                          if (oi >= 0) {
+                              idle = 0
+                              if (info.size > 0 && info.presentationTimeUs >= nextUs) {
+                                  val img = c.getOutputImage(oi)
+                                  val s = if (img != null) frameColor(img, acc) else null
+                                  if (img != null) img.close()
+                                  if (s == null) {
+                                      failed = true
+                                      outDone = true
+                                  } else {
+                                      // One slot per interval; a frame covers every slot up to its own time.
+                                      while (nextUs <= info.presentationTimeUs) {
+                                          out.write(s[0])
+                                          out.write(s[1])
+                                          out.write(s[2])
+                                          out.write(s[3])
+                                          nextUs += intervalUs
+                                      }
+                                      if (durUs > 0) {
+                                          onProgress((info.presentationTimeUs.toFloat() / durUs).coerceIn(0f, 1f))
+                                      }
+                                  }
+                              }
+                              c.releaseOutputBuffer(oi, false)
+                              if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true
+                          } else if (inDone) {
+                              idle++
+                              if (idle > 500) outDone = true
+                          }
+                      }
+
+                      if (Jobs.cancel || failed || out.size() == 0) return null
+                      val dMs = maxOf(durUs / 1000, (out.size() / 4).toLong() * intervalMs)
+                      return Result(out.toByteArray(), dMs)
+                  } finally {
+                      try {
+                          codec?.stop()
+                      } catch (e: Exception) {
+                      }
+                      try {
+                          codec?.release()
+                      } catch (e: Exception) {
+                      }
+                      ex.release()
+                  }
+              }
+
+              /** Samples a grid of pixels from one decoded frame. Returns [r, g, b, brightness] or null if unsupported. */
+              private fun frameColor(img: Image, acc: Accum): IntArray? {
+                  if (img.format != ImageFormat.YUV_420_888) return null
+                  val crop = img.cropRect
+                  val cw = crop.width()
+                  val ch = crop.height()
+                  if (cw <= 0 || ch <= 0) return null
+                  val pY = img.planes[0]
+                  val pU = img.planes[1]
+                  val pV = img.planes[2]
+                  val bY = pY.buffer
+                  val bU = pU.buffer
+                  val bV = pV.buffer
+                  acc.reset()
+                  val gx = 64
+                  val gy = 36
+                  for (j in 0 until gy) {
+                      val y = crop.top + (j * ch + ch / 2) / gy
+                      for (i in 0 until gx) {
+                          val x = crop.left + (i * cw + cw / 2) / gx
+                          val yy = bY.get(minOf(y * pY.rowStride + x * pY.pixelStride, bY.limit() - 1)).toInt() and 0xFF
+                          val uu = bU.get(minOf((y / 2) * pU.rowStride + (x / 2) * pU.pixelStride, bU.limit() - 1)).toInt() and 0xFF
+                          val vv = bV.get(minOf((y / 2) * pV.rowStride + (x / 2) * pV.pixelStride, bV.limit() - 1)).toInt() and 0xFF
+                          val c = 1.164f * (yy - 16)
+                          val d = uu - 128
+                          val e = vv - 128
+                          val r = (c + 1.793f * e).toInt().coerceIn(0, 255)
+                          val g = (c - 0.213f * d - 0.533f * e).toInt().coerceIn(0, 255)
+                          val b = (c + 2.112f * d).toInt().coerceIn(0, 255)
+                          acc.add(r, g, b)
+                      }
+                  }
+                  return acc.result()
+              }
+          }
+          EOF
+
           cat > app/src/main/java/com/example/wizsync/SyncService.kt <<'EOF'
           package com.example.wizsync
 
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
           import android.app.Service
           import android.content.Context
           import android.content.Intent
           import android.content.pm.ServiceInfo
-          import android.graphics.Color
           import android.graphics.PixelFormat
           import android.hardware.display.DisplayManager
           import android.hardware.display.VirtualDisplay
           import android.media.ImageReader
           import android.media.projection.MediaProjection
           import android.media.projection.MediaProjectionManager
-          import android.os.Build
           import android.os.Handler
           import android.os.HandlerThread
           import android.os.IBinder
           import android.os.SystemClock
-          import java.net.DatagramPacket
-          import java.net.DatagramSocket
-          import java.net.InetAddress
-          import kotlin.math.pow
 
+          /** Live sync: mirrors whatever is on this screen onto the bulbs. */
           class SyncService : Service() {
-
-              // ---- Tuning (edit these, push, rebuild) ----
-              private val minDim = 40        // lowest bulb brightness in %, 10..100
-              private val gamma = 0.6f       // lower = brighter in dark scenes
-              private val satBoost = 2.2f    // higher = more vivid colors
-              private val minSat = 0.7f      // colored scenes never get paler than this (avoids pink wash-out)
-              private val gainR = 1.0f       // per-channel trim; lower gainB if colors still look pink/purple
-              private val gainG = 1.0f
-              private val gainB = 0.8f
 
               private var projection: MediaProjection? = null
               private var display: VirtualDisplay? = null
               private var reader: ImageReader? = null
-              private var sock: DatagramSocket? = null
+              private var sender: Sender? = null
               private var thread: HandlerThread? = null
-              // (bulb id, address) for every bulb found at start; the on/off switches in the app decide who gets colors
-              private var targets: List<Pair<String, InetAddress>> = emptyList()
 
               override fun onBind(i: Intent?): IBinder? = null
 
@@ -454,7 +1725,7 @@ jobs:
                       stopSelf()
                       return START_NOT_STICKY
                   }
-                  startFg("Starting...")
+                  Notif.startFg(this, 1, "Starting...", ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
 
                   val t = HandlerThread("wiz-sync").also { it.start() }
                   thread = t
@@ -472,36 +1743,12 @@ jobs:
                   return START_NOT_STICKY
               }
 
-              private fun notif(text: String): Notification {
-                  val nm = getSystemService(NotificationManager::class.java)
-                  nm.createNotificationChannel(
-                      NotificationChannel("sync", "Light sync", NotificationManager.IMPORTANCE_LOW)
-                  )
-                  return Notification.Builder(this, "sync")
-                      .setContentTitle("WiZ sync")
-                      .setContentText(text)
-                      .setSmallIcon(android.R.drawable.ic_menu_view)
-                      .build()
-              }
-
-              private fun startFg(text: String) {
-                  if (Build.VERSION.SDK_INT >= 29) {
-                      startForeground(1, notif(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                  } else {
-                      startForeground(1, notif(text))
-                  }
-              }
-
               // Runs on the worker thread: find bulbs, then start grabbing frames.
               private fun begin(h: Handler) {
-                  val s = DatagramSocket()
-                  sock = s
-                  val found = Wiz.discover()
-                  targets = found.map { it.key to InetAddress.getByName(it.ip) }
-                  val offNow = Wiz.disabled(this)
-                  val active = targets.count { it.first !in offNow }
-                  getSystemService(NotificationManager::class.java)
-                      .notify(1, notif("Syncing $active of ${targets.size} bulb(s)"))
+                  val s = Sender(this)
+                  sender = s
+                  val n = s.refresh()
+                  Notif.update(this, 1, "Syncing $n of ${s.total()} bulb(s)")
 
                   val dm = resources.displayMetrics
                   val w = 96
@@ -509,6 +1756,7 @@ jobs:
                   val rd = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
                   reader = rd
 
+                  val acc = Accum()
                   var sr = -1f
                   var sg = 0f
                   var sb = 0f
@@ -524,49 +1772,37 @@ jobs:
 
                           val p = img.planes[0]
                           val buf = p.buffer
-                          var wr = 0.0
-                          var wg = 0.0
-                          var wb = 0.0
-                          var ws = 0.0
-                          var vsum = 0.0
+                          acc.reset()
                           for (y in 0 until hh) {
                               for (x in 0 until w) {
                                   val o = y * p.rowStride + x * p.pixelStride
-                                  val pr = buf.get(o).toInt() and 0xFF
-                                  val pg = buf.get(o + 1).toInt() and 0xFF
-                                  val pb = buf.get(o + 2).toInt() and 0xFF
-                                  val mx = maxOf(pr, pg, pb)
-                                  vsum += mx
-                                  // Skip near-black pixels (letterbox bars, deep shadows) so they
-                                  // don't wash out the color of the visible scene.
-                                  if (mx < 24) continue
-                                  val mn = minOf(pr, pg, pb)
-                                  val v = mx / 255.0
-                                  val sat = (mx - mn).toDouble() / mx
-                                  // Bright, colorful pixels count the most.
-                                  val wt = v * v * (0.15 + sat)
-                                  wr += pr * wt
-                                  wg += pg * wt
-                                  wb += pb * wt
-                                  ws += wt
+                                  acc.add(
+                                      buf.get(o).toInt() and 0xFF,
+                                      buf.get(o + 1).toInt() and 0xFF,
+                                      buf.get(o + 2).toInt() and 0xFF
+                                  )
                               }
                           }
-                          val avgV = (vsum / (w * hh) / 255.0).toFloat()
+                          val res = acc.result()
 
-                          if (ws > 0.0001) {
-                              val cr = (wr / ws).toFloat()
-                              val cg = (wg / ws).toFloat()
-                              val cb = (wb / ws).toFloat()
+                          // A frame with no usable color keeps the previous color.
+                          if (res[0] != 0 || res[1] != 0 || res[2] != 0) {
+                              val cr = res[0].toFloat()
+                              val cg = res[1].toFloat()
+                              val cb = res[2].toFloat()
                               if (sr < 0) {
-                                  sr = cr; sg = cg; sb = cb
+                                  sr = cr
+                                  sg = cg
+                                  sb = cb
                               } else {
                                   sr += (cr - sr) * 0.5f
                                   sg += (cg - sg) * 0.5f
                                   sb += (cb - sb) * 0.5f
                               }
                           }
-                          sv = if (sv < 0) avgV else sv + (avgV - sv) * 0.5f
-                          if (sr >= 0) send(s, sr, sg, sb, sv)
+                          val av = res[3] / 255f
+                          sv = if (sv < 0) av else sv + (av - sv) * 0.5f
+                          if (sr >= 0) s.send(sr, sg, sb, sv)
                       } finally {
                           img.close()
                       }
@@ -578,48 +1814,156 @@ jobs:
                   )
               }
 
-              private fun send(s: DatagramSocket, r: Float, g: Float, b: Float, v: Float) {
-                  // Brightness: never below minDim, brighter scenes go up to 100.
-                  val dim = (minDim + (100 - minDim) * v.coerceIn(0f, 1f).pow(gamma)).toInt()
-                      .coerceIn(minDim, 100)
-
-                  val hsv = FloatArray(3)
-                  Color.RGBToHSV(
-                      r.toInt().coerceIn(0, 255),
-                      g.toInt().coerceIn(0, 255),
-                      b.toInt().coerceIn(0, 255),
-                      hsv
-                  )
-
-                  val text = if (hsv[1] < 0.12f) {
-                      // Almost no color in the scene: use the white LEDs instead of a washed-out RGB mix.
-                      """{"method":"setPilot","params":{"state":true,"temp":4500,"dimming":$dim}}"""
-                  } else {
-                      // Keep the scene's hue but send it at full strength with no white component,
-                      // otherwise the bulb's red and blue LEDs overpower green and everything looks pink.
-                      val sat = (hsv[1] * satBoost).coerceIn(minSat, 1f)
-                      val c = Color.HSVToColor(floatArrayOf(hsv[0], sat, 1f))
-                      val rr = (Color.red(c) * gainR).toInt().coerceIn(0, 255)
-                      val gg = (Color.green(c) * gainG).toInt().coerceIn(0, 255)
-                      val bb = (Color.blue(c) * gainB).toInt().coerceIn(0, 255)
-                      """{"method":"setPilot","params":{"state":true,"r":$rr,"g":$gg,"b":$bb,"dimming":$dim}}"""
-                  }
-                  val msg = text.toByteArray()
-                  val off = Wiz.disabled(this)
-                  for ((key, ip) in targets) {
-                      if (key in off) continue
-                      try {
-                          s.send(DatagramPacket(msg, msg.size, ip, Wiz.PORT))
-                      } catch (e: Exception) {
-                      }
-                  }
-              }
-
               override fun onDestroy() {
                   display?.release()
                   reader?.close()
                   projection?.stop()
-                  sock?.close()
+                  sender?.close()
+                  thread?.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/AnalyzeService.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.IBinder
+          import android.os.PowerManager
+          import android.os.SystemClock
+
+          /** Reads a video file in the background and saves its color track. */
+          class AnalyzeService : Service() {
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
+                  if (i == null || Jobs.running) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  val uri = i.data
+                  if (uri == null) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  val name = i.getStringExtra("name") ?: "Video"
+                  val interval = i.getIntExtra("interval", 500)
+
+                  Notif.startFg(this, 2, "Analyzing $name", ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                  Jobs.running = true
+                  Jobs.cancel = false
+                  Jobs.progress = 0f
+                  Jobs.title = name
+                  Jobs.message = ""
+                  Jobs.startedAt = SystemClock.elapsedRealtime()
+
+                  Thread {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wizsync:analyze")
+                      wl.acquire(6 * 60 * 60 * 1000L)
+                      var lastNote = 0L
+                      try {
+                          val r = Analyzer.run(this, uri, interval) { p ->
+                              Jobs.progress = p
+                              val now = SystemClock.elapsedRealtime()
+                              if (now - lastNote > 3000) {
+                                  lastNote = now
+                                  Notif.update(this, 2, "Analyzing $name: ${(p * 100).toInt()}%")
+                              }
+                          }
+                          if (r != null) {
+                              Tracks.save(this, name, interval, r.durationMs, r.data)
+                              Jobs.libraryVersion++
+                              Jobs.message = "Saved \"$name\". Open Saved tracks below to use it."
+                          } else if (Jobs.cancel) {
+                              Jobs.message = "Analysis cancelled."
+                          } else {
+                              Jobs.message = "This video can't be analyzed (HDR / 10-bit and some formats aren't supported yet)."
+                          }
+                      } catch (e: Exception) {
+                          Jobs.message = "Could not analyze this video: ${e.message}"
+                      } finally {
+                          try {
+                              wl.release()
+                          } catch (e: Exception) {
+                          }
+                          Jobs.running = false
+                          stopSelf()
+                      }
+                  }.start()
+                  return START_NOT_STICKY
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/example/wizsync/PlayService.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+
+          /** Movie lights: plays a saved color track onto the bulbs, following the clock in Player. */
+          class PlayService : Service() {
+
+              companion object {
+                  @Volatile
+                  var running = false
+              }
+
+              private var thread: HandlerThread? = null
+              private var handler: Handler? = null
+              private var sender: Sender? = null
+              private val buf = FloatArray(4)
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
+                  Notif.startFg(this, 3, "Movie lights ready", ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                  if (running) return START_NOT_STICKY
+                  running = true
+
+                  val t = HandlerThread("wiz-play").also { it.start() }
+                  thread = t
+                  val h = Handler(t.looper)
+                  handler = h
+                  h.post {
+                      val s = Sender(this)
+                      sender = s
+                      val n = s.refresh()
+                      Notif.update(this, 3, "Movie lights: $n of ${s.total()} bulb(s)")
+                      tick(h, s)
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun tick(h: Handler, s: Sender) {
+                  if (!running) return
+                  val t = Player.track
+                  if (t != null && Player.playing) {
+                      val pos = Player.position()
+                      if (pos >= t.durationMs) {
+                          Player.pause()
+                      } else {
+                          t.colorAt(pos, buf)
+                          s.send(buf[0], buf[1], buf[2], buf[3] / 255f)
+                      }
+                  }
+                  h.postDelayed({ tick(h, s) }, 100)
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  handler?.removeCallbacksAndMessages(null)
+                  sender?.close()
                   thread?.quitSafely()
                   super.onDestroy()
               }
@@ -636,4 +1980,4 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk wiz-sync.apk
           gh release delete apk --yes --cleanup-tag || true
-          gh release create apk wiz-sync.apk --target "$GITHUB_SHA" --title "WiZ Sync" --notes "Debug build of the WiZ screen-sync app" --latest
+          gh release create apk wiz-sync.apk --target "$GITHUB_SHA" --title "WiZ Sync" --notes "Debug build of the WiZ screen-sync app" --latest                
