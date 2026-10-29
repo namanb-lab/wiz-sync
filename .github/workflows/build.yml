@@ -69,8 +69,8 @@ jobs:
                   applicationId = "com.example.wizsync"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 3
-                  versionName = "3.0"
+                  versionCode = 4
+                  versionName = "4.0"
               }
 
               compileOptions {
@@ -217,13 +217,17 @@ jobs:
           import android.os.Looper
           import android.os.SystemClock
           import android.provider.OpenableColumns
+          import android.text.InputType
+          import android.view.Gravity
           import android.view.View
           import android.view.ViewGroup
+          import android.widget.EditText
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import com.google.android.material.button.MaterialButton
           import com.google.android.material.button.MaterialButtonToggleGroup
@@ -250,8 +254,17 @@ jobs:
               private lateinit var seek: Slider
               private lateinit var playBtn: MaterialButton
 
+              private lateinit var effectBtn: MaterialButton
+              private lateinit var cueHeader: TextView
+              private lateinit var cueList: LinearLayout
+              private lateinit var minEdit: EditText
+              private lateinit var secEdit: EditText
+
               private var dragging = false
               private var libShown = -1
+              private var cueShown = -1
+              private var cuePage = 0
+              private var selectedKind = Fx.LIGHTNING
               private var intervalMs = 500
 
               private val capture =
@@ -499,6 +512,20 @@ jobs:
                   a.body.addView(group)
                   a.body.addView(space(14))
 
+                  val detect = MaterialSwitch(this)
+                  detect.text = "Find lightning and blasts automatically"
+                  detect.textSize = 15f
+                  detect.setTextColor(Pal.text)
+                  detect.isChecked = Look.get(this, Look.K_DETECT) == 1
+                  detect.setOnCheckedChangeListener { _, on -> Look.set(this, Look.K_DETECT, if (on) 1 else 0) }
+                  a.body.addView(detect)
+                  a.body.addView(
+                      sliderRow("Detection sensitivity", 1, 100, Look.get(this, Look.K_SENS), { "$it" }) { v ->
+                          Look.set(this, Look.K_SENS, v)
+                      }
+                  )
+                  a.body.addView(space(8))
+
                   analyzeBtn = btn("Choose video and analyze") { chooseVideo() }
                   a.body.addView(analyzeBtn)
 
@@ -567,7 +594,159 @@ jobs:
                   p.body.addView(space(6))
                   p.body.addView(row(nudge("-1s", -1_000L), nudge("-0.25s", -250L), nudge("+0.25s", 250L), nudge("+1s", 1_000L)))
 
-                  return page(a.card, b.card, p.card)
+                  val e = buildEffects()
+                  return page(a.card, b.card, p.card, e)
+              }
+
+              // =====================================================================
+              // Effects and cues
+              // =====================================================================
+
+              private fun numberField(hintText: String): EditText {
+                  val f = EditText(this)
+                  f.hint = hintText
+                  f.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  f.setTextColor(Pal.text)
+                  f.setHintTextColor(Pal.sub)
+                  f.gravity = Gravity.CENTER
+                  return f
+              }
+
+              private fun compact(text: String, onClick: () -> Unit): MaterialButton {
+                  val b = btn(text, false, onClick)
+                  b.textSize = 13f
+                  b.minWidth = 0
+                  b.minimumWidth = 0
+                  b.setPadding(dp(2), dp(8), dp(2), dp(8))
+                  return b
+              }
+
+              private fun buildEffects(): LinearLayout {
+                  val e = card(
+                      "Effects and cues",
+                      "Add light effects at exact moments of the loaded movie. Finding lightning and blasts automatically is done when you analyze a video; you can also add your own here."
+                  )
+                  e.body.addView(label("Effect", 14f, Pal.sub))
+                  effectBtn = btn(Fx.name(selectedKind), false) { chooseEffect() }
+                  e.body.addView(effectBtn)
+                  e.body.addView(space(8))
+                  e.body.addView(
+                      row(
+                          btn("Fire now") { Effects.fire(this, selectedKind, null) },
+                          btn("Mark here") { markHere() }
+                      )
+                  )
+                  e.body.addView(label("Fire now plays it on the bulbs. Mark here saves it at the current movie time.", 12f, Pal.sub))
+                  e.body.addView(space(14))
+
+                  e.body.addView(label("Add at a time", 14f, Pal.sub))
+                  minEdit = numberField("min")
+                  secEdit = numberField("sec")
+                  e.body.addView(row(minEdit, secEdit, btn("Add") { addAtTime() }))
+                  e.body.addView(space(14))
+
+                  cueHeader = label("No cues yet", 14f, Pal.text, true)
+                  e.body.addView(cueHeader)
+                  cueList = LinearLayout(this)
+                  cueList.orientation = LinearLayout.VERTICAL
+                  e.body.addView(cueList)
+                  e.body.addView(space(10))
+                  e.body.addView(
+                      row(
+                          compact("Prev") {
+                              cuePage = maxOf(0, cuePage - 1)
+                              renderCues()
+                          },
+                          compact("Next") {
+                              cuePage++
+                              renderCues()
+                          },
+                          compact("Near now") { jumpCuesToNow() }
+                      )
+                  )
+                  e.body.addView(space(8))
+                  e.body.addView(
+                      btn("Delete auto-detected cues", false) {
+                          CueBook.clearAuto(this)
+                          toast("Auto-detected cues removed")
+                      }
+                  )
+                  return page(e.card)
+              }
+
+              private fun chooseEffect() {
+                  val names = Fx.all.map { Fx.name(it) }.toTypedArray()
+                  AlertDialog.Builder(this)
+                      .setTitle("Choose an effect")
+                      .setItems(names) { _, i ->
+                          selectedKind = Fx.all[i]
+                          effectBtn.text = Fx.name(selectedKind)
+                      }
+                      .show()
+              }
+
+              private fun markHere() {
+                  if (Player.track == null) {
+                      toast("Load a saved track first")
+                      return
+                  }
+                  // People tap a moment after they see it, so save it a little earlier.
+                  val ms = maxOf(0L, Player.position() - 300L)
+                  CueBook.add(this, Cue(ms, selectedKind, false))
+                  toast("Added ${Fx.name(selectedKind)} at ${fmtMs(ms)}")
+              }
+
+              private fun addAtTime() {
+                  val t = Player.track
+                  if (t == null) {
+                      toast("Load a saved track first")
+                      return
+                  }
+                  val mm = minEdit.text.toString().toDoubleOrNull() ?: 0.0
+                  val ss = secEdit.text.toString().toDoubleOrNull() ?: 0.0
+                  val ms = ((mm * 60.0 + ss) * 1000.0).toLong()
+                  if (ms < 0L || ms > t.durationMs) {
+                      toast("That time is outside this movie")
+                      return
+                  }
+                  CueBook.add(this, Cue(ms, selectedKind, false))
+                  toast("Added ${Fx.name(selectedKind)} at ${fmtMs(ms)}")
+              }
+
+              private fun jumpCuesToNow() {
+                  val pos = Player.position() - 1000L
+                  val all = Player.cues
+                  var idx = all.indexOfFirst { it.ms >= pos }
+                  if (idx < 0) idx = maxOf(0, all.size - 1)
+                  cuePage = idx / 15
+                  renderCues()
+              }
+
+              private fun renderCues() {
+                  cueShown = Player.cueVersion
+                  cueList.removeAllViews()
+                  val all = Player.cues
+                  val pageSize = 15
+                  val pages = maxOf(1, (all.size + pageSize - 1) / pageSize)
+                  cuePage = cuePage.coerceIn(0, pages - 1)
+                  val from = cuePage * pageSize
+                  val to = minOf(all.size, from + pageSize)
+                  cueHeader.text = if (all.isEmpty()) "No cues yet" else "Cues ${from + 1}-$to of ${all.size}"
+                  for (k in from until to) {
+                      val c = all[k]
+                      val tl = tile()
+                      val auto = if (c.auto) "  (auto)" else ""
+                      tl.addView(label("${fmtMs(c.ms)}   ${Fx.name(c.kind)}$auto", 15f, Pal.text, true))
+                      tl.addView(space(6))
+                      tl.addView(
+                          row(
+                              compact("Go") { Player.seek(maxOf(0L, c.ms - 3000L)) },
+                              compact("Test") { Effects.fire(this, c.kind, null) },
+                              compact("Delete") { CueBook.remove(this, c) }
+                          )
+                      )
+                      cueList.addView(tl)
+                  }
               }
 
               private fun nudge(text: String, deltaMs: Long): MaterialButton {
@@ -668,6 +847,8 @@ jobs:
                       toast("Could not open that track")
                   } else {
                       Player.load(t)
+                      CueBook.set(Tracks.loadCues(this, id))
+                      cuePage = 0
                       toast("Loaded: ${t.name}")
                   }
               }
@@ -700,6 +881,7 @@ jobs:
                   }
 
                   if (libShown != Jobs.libraryVersion) renderLibrary()
+                  if (cueShown != Player.cueVersion) renderCues()
 
                   val t = Player.track
                   if (t == null) {
@@ -775,6 +957,21 @@ jobs:
                   add("Green level", Look.K_G, 40, 100)
                   add("Blue level", Look.K_B, 40, 100)
 
+                  box.body.addView(space(10))
+                  val gentle = MaterialSwitch(this)
+                  gentle.text = "Gentle flashes (safer)"
+                  gentle.textSize = 15f
+                  gentle.setTextColor(Pal.text)
+                  gentle.isChecked = Look.get(this, Look.K_GENTLE) == 1
+                  gentle.setOnCheckedChangeListener { _, on -> Look.set(this, Look.K_GENTLE, if (on) 1 else 0) }
+                  box.body.addView(gentle)
+                  box.body.addView(
+                      label(
+                          "Fewer, softer flashes for lightning and other effects. Recommended if anyone watching is sensitive to flashing lights.",
+                          12f,
+                          Pal.sub
+                      )
+                  )
                   box.body.addView(space(14))
                   box.body.addView(btn("Reset to defaults", false) {
                       Look.reset(this)
@@ -825,6 +1022,8 @@ jobs:
               val sec = s % 60
               return if (h > 0) String.format("%d:%02d:%02d", h, m, sec) else String.format("%d:%02d", m, sec)
           }
+
+          fun fmtMs(ms: Long): String = fmtDur(ms) + "." + ((ms % 1000) / 100)
 
           fun Context.label(text: String, size: Float, color: Int = Pal.text, bold: Boolean = false): TextView {
               val t = TextView(this)
@@ -1040,10 +1239,14 @@ jobs:
               const val K_R = "gainR"          // 40..100 %
               const val K_G = "gainG"
               const val K_B = "gainB"
+              const val K_GENTLE = "gentle"    // 0/1: softer, fewer flashes
+              const val K_DETECT = "detect"    // 0/1: find lightning/blasts while analyzing
+              const val K_SENS = "sens"        // 1..100: detection sensitivity
 
               private val defaults = mapOf(
                   K_MIN_DIM to 40, K_BOOST to 57, K_SAT to 60, K_MIN_SAT to 70,
-                  K_R to 100, K_G to 100, K_B to 80
+                  K_R to 100, K_G to 100, K_B to 80,
+                  K_GENTLE to 0, K_DETECT to 1, K_SENS to 50
               )
 
               private fun prefs(ctx: Context) = ctx.getSharedPreferences("look", Context.MODE_PRIVATE)
@@ -1120,7 +1323,8 @@ jobs:
 
               /** Scans for bulbs (takes a few seconds). Returns how many are switched on for sync. */
               fun refresh(): Int {
-                  targets = Wiz.discover().map { it.key to InetAddress.getByName(it.ip) }
+                  val list = Wiz.known(10 * 60 * 1000L) ?: Wiz.discover()
+                  targets = list.map { it.key to InetAddress.getByName(it.ip) }
                   return active()
               }
 
@@ -1141,6 +1345,39 @@ jobs:
                           sock.send(DatagramPacket(msg, msg.size, ip, Wiz.PORT))
                       } catch (e: Exception) {
                       }
+                  }
+              }
+
+              /** For effects: even-numbered bulbs get color a, odd-numbered get color b (0xRRGGBB, or Fx.W for white). */
+              fun sendSplit(a: Int, da: Int, b: Int, db: Int) {
+                  val p = Look.params(ctx)
+                  val off = Wiz.disabled(ctx)
+                  var idx = 0
+                  for ((key, ip) in targets) {
+                      if (key in off) continue
+                      val even = idx % 2 == 0
+                      idx++
+                      val msg = Fx.json(if (even) a else b, if (even) da else db, p).toByteArray()
+                      raw(ip, msg)
+                  }
+              }
+
+              /** Starts one of the bulb's built-in scenes. */
+              fun sendScene(sceneId: Int) {
+                  val msg =
+                      """{"method":"setPilot","params":{"state":true,"sceneId":$sceneId,"speed":100,"dimming":100}}"""
+                          .toByteArray()
+                  val off = Wiz.disabled(ctx)
+                  for ((key, ip) in targets) {
+                      if (key in off) continue
+                      raw(ip, msg)
+                  }
+              }
+
+              private fun raw(ip: InetAddress, msg: ByteArray) {
+                  try {
+                      sock.send(DatagramPacket(msg, msg.size, ip, Wiz.PORT))
+                  } catch (e: Exception) {
                   }
               }
 
@@ -1207,6 +1444,18 @@ jobs:
           object Wiz {
               const val PORT = 38899
 
+              @Volatile
+              private var cache: List<Bulb> = emptyList()
+
+              @Volatile
+              private var cacheAt = 0L
+
+              /** Bulbs found recently (so services can start instantly), or null if the list is old or empty. */
+              fun known(maxAgeMs: Long): List<Bulb>? {
+                  val c = cache
+                  return if (c.isNotEmpty() && SystemClock.elapsedRealtime() - cacheAt < maxAgeMs) c else null
+              }
+
               // If auto-discovery misses a bulb, add its IP here, e.g. listOf("192.168.1.50", "192.168.1.51")
               val manualIps = listOf<String>()
 
@@ -1243,8 +1492,11 @@ jobs:
                       s.close()
                   }
                   ips.addAll(manualIps)
-                  return ips.map { details(it) }
+                  val result = ips.map { details(it) }
                       .sortedBy { it.ip.substringAfterLast('.').toIntOrNull() ?: 0 }
+                  cache = result
+                  cacheAt = SystemClock.elapsedRealtime()
+                  return result
               }
 
               private fun details(ip: String): Bulb {
@@ -1430,6 +1682,37 @@ jobs:
 
               fun delete(ctx: Context, id: String) {
                   File(dir(ctx), "$id.wzc").delete()
+                  File(dir(ctx), "$id.cues").delete()
+              }
+
+              /** Effect cues are kept in a small text file next to the track: one "ms,kind,auto" line each. */
+              fun saveCues(ctx: Context, id: String, cues: List<Cue>) {
+                  val sb = StringBuilder()
+                  for (c in cues) {
+                      sb.append(c.ms).append(',').append(c.kind).append(',').append(if (c.auto) 1 else 0).append('\n')
+                  }
+                  try {
+                      File(dir(ctx), "$id.cues").writeText(sb.toString())
+                  } catch (e: Exception) {
+                  }
+              }
+
+              fun loadCues(ctx: Context, id: String): List<Cue> {
+                  val f = File(dir(ctx), "$id.cues")
+                  if (!f.exists()) return emptyList()
+                  val out = ArrayList<Cue>()
+                  try {
+                      for (line in f.readLines()) {
+                          val p = line.split(',')
+                          if (p.size >= 3) {
+                              val ms = p[0].toLongOrNull()
+                              val kind = p[1].toIntOrNull()
+                              if (ms != null && kind != null) out.add(Cue(ms, kind, p[2] == "1"))
+                          }
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return out
               }
 
               private fun hasColor(d: ByteArray, i: Int): Boolean {
@@ -1470,6 +1753,8 @@ jobs:
           object Player {
               @Volatile var track: Track? = null
               @Volatile var playing = false
+              @Volatile var cues: List<Cue> = emptyList()
+              @Volatile var cueVersion = 0
               private var baseMs = 0L
               private var baseWall = 0L
 
@@ -1519,6 +1804,8 @@ jobs:
                   track = null
                   playing = false
                   baseMs = 0L
+                  cues = emptyList()
+                  cueVersion++
               }
           }
 
@@ -1534,10 +1821,212 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/java/com/example/wizsync/Effects.kt <<'EOF'
+          package com.example.wizsync
+
+          import android.content.Context
+          import android.os.SystemClock
+          import java.util.concurrent.Executors
+
+          /** One light effect placed at a moment of a movie. */
+          class Cue(val ms: Long, val kind: Int, val auto: Boolean)
+
+          /** The effects the app can play, and the little "scripts" that make them. */
+          object Fx {
+              const val LIGHTNING = 1
+              const val BLAST = 2
+              const val ALARM = 3
+              const val FIRE = 4
+              const val HEART = 5
+              const val SC_FIREPLACE = 11
+              const val SC_PARTY = 12
+              const val SC_OCEAN = 13
+
+              /** Packed 0xRRGGBB, or W for the bulb's cool white LEDs (brightest, best for flashes). */
+              const val W = -1
+
+              val all = listOf(LIGHTNING, BLAST, ALARM, FIRE, HEART, SC_FIREPLACE, SC_PARTY, SC_OCEAN)
+
+              fun name(k: Int): String = when (k) {
+                  LIGHTNING -> "\u26A1 Lightning"
+                  BLAST -> "\uD83D\uDCA5 Blast"
+                  ALARM -> "\uD83D\uDEA8 Alarm"
+                  FIRE -> "\uD83D\uDD25 Fire flicker"
+                  HEART -> "\uD83D\uDC93 Heartbeat"
+                  SC_FIREPLACE -> "Fireplace (WiZ scene)"
+                  SC_PARTY -> "Party (WiZ scene)"
+                  SC_OCEAN -> "Ocean (WiZ scene)"
+                  else -> "Effect"
+              }
+
+              /** One moment of an effect. Even-numbered bulbs show a, odd-numbered bulbs show b. */
+              class Step(
+                  val ms: Int,
+                  val a: Int,
+                  val da: Int,
+                  val b: Int = a,
+                  val db: Int = da,
+                  val scene: Int = 0
+              )
+
+              private fun rgb(r: Int, g: Int, b: Int): Int = (r shl 16) or (g shl 8) or b
+
+              private fun rnd(n: Int): Int = (Math.random() * n).toInt()
+
+              fun script(kind: Int, gentle: Boolean): List<Step> {
+                  when (kind) {
+                      LIGHTNING -> {
+                          val dark = rgb(10, 14, 45)
+                          val glow = rgb(140, 165, 255)
+                          val dim = rgb(70, 90, 190)
+                          return if (gentle) {
+                              // at most two soft flashes per second
+                              listOf(
+                                  Step(110, W, 80), Step(380, glow, 40), Step(260, dim, 25),
+                                  Step(130, W, 55), Step(400, dim, 25)
+                              )
+                          } else {
+                              listOf(
+                                  Step(60, W, 100), Step(70, dark, 10),
+                                  Step(90, W, 100), Step(55, dark, 10),
+                                  Step(50, W, 75),
+                                  Step(140, glow, 45), Step(180, dim, 25)
+                              )
+                          }
+                      }
+                      BLAST -> return listOf(
+                          Step(90, rgb(255, 215, 130), 100),
+                          Step(120, rgb(255, 150, 30), 100),
+                          Step(200, rgb(255, 90, 10), 85),
+                          Step(300, rgb(210, 45, 5), 60),
+                          Step(400, rgb(130, 20, 0), 40)
+                      )
+                      ALARM -> {
+                          val red = rgb(255, 0, 0)
+                          val blue = rgb(0, 40, 255)
+                          val out = ArrayList<Step>()
+                          for (i in 0 until 6) {
+                              if (i % 2 == 0) out.add(Step(350, red, 100, blue, 100)) else out.add(Step(350, blue, 100, red, 100))
+                          }
+                          return out
+                      }
+                      FIRE -> {
+                          val pal = intArrayOf(rgb(255, 100, 10), rgb(255, 140, 20), rgb(255, 60, 0), rgb(230, 80, 5))
+                          val out = ArrayList<Step>()
+                          var total = 0
+                          while (total < 2800) {
+                              val ms = if (gentle) 260 + rnd(200) else 90 + rnd(130)
+                              out.add(Step(ms, pal[rnd(pal.size)], 55 + rnd(45)))
+                              total += ms
+                          }
+                          return out
+                      }
+                      HEART -> {
+                          val red = rgb(255, 15, 25)
+                          val one = listOf(
+                              Step(130, red, 100), Step(110, red, 30),
+                              Step(130, red, 90), Step(520, rgb(120, 5, 10), 20)
+                          )
+                          return one + one
+                      }
+                      SC_FIREPLACE -> return listOf(Step(ms = 6000, a = W, da = 100, scene = 5))
+                      SC_PARTY -> return listOf(Step(ms = 6000, a = W, da = 100, scene = 4))
+                      SC_OCEAN -> return listOf(Step(ms = 6000, a = W, da = 100, scene = 1))
+                  }
+                  return emptyList()
+              }
+
+              fun json(color: Int, dim: Int, p: LookParams): String {
+                  val d = dim.coerceIn(10, 100)
+                  if (color == W) {
+                      return """{"method":"setPilot","params":{"state":true,"temp":6500,"dimming":$d}}"""
+                  }
+                  val r = (((color shr 16) and 0xFF) * p.gainR).toInt().coerceIn(0, 255)
+                  val g = (((color shr 8) and 0xFF) * p.gainG).toInt().coerceIn(0, 255)
+                  val b = ((color and 0xFF) * p.gainB).toInt().coerceIn(0, 255)
+                  return """{"method":"setPilot","params":{"state":true,"r":$r,"g":$g,"b":$b,"dimming":$d}}"""
+              }
+          }
+
+          /** Plays effects on the bulbs, one at a time, on a background thread. */
+          object Effects {
+              /** The movie-lights loop stays quiet until this time so it doesn't fight an effect. */
+              @Volatile
+              var busyUntil = 0L
+
+              private val exec = Executors.newSingleThreadExecutor { r ->
+                  val t = Thread(r)
+                  t.isDaemon = true
+                  t
+              }
+
+              /** shared = the sender the caller already has; null = use the bulbs found earlier. */
+              fun fire(ctx: Context, kind: Int, shared: Sender?) {
+                  val app = ctx.applicationContext
+                  val steps = Fx.script(kind, Look.get(app, Look.K_GENTLE) == 1)
+                  if (steps.isEmpty()) return
+                  var total = 0
+                  for (st in steps) total += st.ms
+                  busyUntil = maxOf(busyUntil, SystemClock.elapsedRealtime()) + total + 150L
+
+                  exec.execute {
+                      var own: Sender? = null
+                      try {
+                          val s: Sender
+                          if (shared != null) {
+                              s = shared
+                          } else {
+                              val tmp = Sender(app)
+                              tmp.refresh()
+                              own = tmp
+                              s = tmp
+                          }
+                          for (st in steps) {
+                              if (st.scene > 0) s.sendScene(st.scene) else s.sendSplit(st.a, st.da, st.b, st.db)
+                              Thread.sleep(st.ms.toLong())
+                          }
+                      } catch (e: Exception) {
+                      } finally {
+                          own?.close()
+                      }
+                  }
+              }
+          }
+
+          /** The list of cues for the loaded track. Changes are saved next to the track. */
+          object CueBook {
+              fun set(list: List<Cue>) {
+                  Player.cues = list.sortedBy { it.ms }
+                  Player.cueVersion++
+              }
+
+              private fun persist(ctx: Context) {
+                  val t = Player.track ?: return
+                  Tracks.saveCues(ctx, t.id, Player.cues)
+              }
+
+              fun add(ctx: Context, c: Cue) {
+                  set(Player.cues + c)
+                  persist(ctx)
+              }
+
+              fun remove(ctx: Context, c: Cue) {
+                  set(Player.cues.filter { it !== c })
+                  persist(ctx)
+              }
+
+              fun clearAuto(ctx: Context) {
+                  set(Player.cues.filter { !it.auto })
+                  persist(ctx)
+              }
+          }
+          EOF
+
           cat > app/src/main/java/com/example/wizsync/Analyzer.kt <<'EOF'
           package com.example.wizsync
 
           import android.content.Context
+          import android.graphics.Color
           import android.graphics.ImageFormat
           import android.media.Image
           import android.media.MediaCodec
@@ -1547,11 +2036,116 @@ jobs:
           import android.net.Uri
           import java.io.ByteArrayOutputStream
 
+          /** Spots short bright flashes (lightning, explosions) in a stream of per-frame brightness values. */
+          class FlashDetector(sens: Int) {
+              // How much brighter than the usual level a frame must be (in brightness units). Higher sensitivity = smaller.
+              private val minRise = 75f - 0.5f * sens.coerceIn(1, 100)
+              private var base = -1f
+              private var pending = false
+              private var pStart = 0L
+              private var pBase = 0f
+              private var pPeak = 0f
+              private var pr = 0f
+              private var pg = 0f
+              private var pb = 0f
+              private var lastEnd = -10_000_000L
+              val cues = ArrayList<Cue>()
+
+              fun feed(ptsUs: Long, y: Float, r: Float, g: Float, b: Float) {
+                  if (base < 0f) {
+                      base = y
+                      return
+                  }
+                  if (!pending) {
+                      if (y - base >= minRise && y >= base * 1.8f + 8f && ptsUs - lastEnd > 1_500_000L) {
+                          pending = true
+                          pStart = ptsUs
+                          pBase = base
+                          pPeak = y
+                          pr = r
+                          pg = g
+                          pb = b
+                      } else {
+                          base += (y - base) * 0.04f
+                      }
+                  } else {
+                      if (y > pPeak) {
+                          pPeak = y
+                          pr = r
+                          pg = g
+                          pb = b
+                      }
+                      val dur = ptsUs - pStart
+                      if (y <= pBase + 0.4f * (pPeak - pBase)) {
+                          // The picture fell back to normal quickly: that was a flash, not a scene change.
+                          if (dur <= 800_000L) cues.add(Cue(pStart / 1000L, kindOf(), true))
+                          pending = false
+                          lastEnd = ptsUs
+                          base = pBase
+                      } else if (dur > 800_000L) {
+                          // It stayed bright: a cut or a lighting change, not a flash.
+                          pending = false
+                          lastEnd = ptsUs
+                          base = y
+                      }
+                  }
+              }
+
+              // White or blue flashes are lightning, warm ones are explosions.
+              private fun kindOf(): Int {
+                  val hsv = FloatArray(3)
+                  Color.RGBToHSV(
+                      pr.toInt().coerceIn(0, 255),
+                      pg.toInt().coerceIn(0, 255),
+                      pb.toInt().coerceIn(0, 255),
+                      hsv
+                  )
+                  val warm = hsv[1] >= 0.30f && (hsv[0] < 70f || hsv[0] > 340f)
+                  return if (warm) Fx.BLAST else Fx.LIGHTNING
+              }
+          }
+
+          /** Reads sample points out of one decoded frame. */
+          private class Px(img: Image) {
+              private val crop = img.cropRect
+              val cw = crop.width()
+              val ch = crop.height()
+              private val pY = img.planes[0]
+              private val pU = img.planes[1]
+              private val pV = img.planes[2]
+              private val bY = pY.buffer
+              private val bU = pU.buffer
+              private val bV = pV.buffer
+
+              /** Reads grid point (i, j) of a gx by gy grid. out = [luma, r, g, b]. */
+              fun read(i: Int, j: Int, gx: Int, gy: Int, out: IntArray) {
+                  val y = crop.top + (j * ch + ch / 2) / gy
+                  val x = crop.left + (i * cw + cw / 2) / gx
+                  val yy = bY.get(minOf(y * pY.rowStride + x * pY.pixelStride, bY.limit() - 1)).toInt() and 0xFF
+                  val uu = bU.get(minOf((y / 2) * pU.rowStride + (x / 2) * pU.pixelStride, bU.limit() - 1)).toInt() and 0xFF
+                  val vv = bV.get(minOf((y / 2) * pV.rowStride + (x / 2) * pV.pixelStride, bV.limit() - 1)).toInt() and 0xFF
+                  val c = 1.164f * (yy - 16)
+                  val d = uu - 128
+                  val e = vv - 128
+                  out[0] = yy
+                  out[1] = (c + 1.793f * e).toInt().coerceIn(0, 255)
+                  out[2] = (c - 0.213f * d - 0.533f * e).toInt().coerceIn(0, 255)
+                  out[3] = (c + 2.112f * d).toInt().coerceIn(0, 255)
+              }
+          }
+
           /** Decodes a video file from start to end and records its scene color every few hundred milliseconds. */
           object Analyzer {
-              class Result(val data: ByteArray, val durationMs: Long)
+              class Result(val data: ByteArray, val durationMs: Long, val cues: List<Cue>)
 
-              fun run(ctx: Context, uri: Uri, intervalMs: Int, onProgress: (Float) -> Unit): Result? {
+              fun run(
+                  ctx: Context,
+                  uri: Uri,
+                  intervalMs: Int,
+                  detect: Boolean,
+                  sens: Int,
+                  onProgress: (Float) -> Unit
+              ): Result? {
                   val ex = MediaExtractor()
                   var codec: MediaCodec? = null
                   try {
@@ -1582,6 +2176,8 @@ jobs:
                       val info = MediaCodec.BufferInfo()
                       val intervalUs = intervalMs * 1000L
                       val acc = Accum()
+                      val det = FlashDetector(sens)
+                      val tmp = IntArray(4)
                       val out = ByteArrayOutputStream()
                       var nextUs = 0L
                       var inDone = false
@@ -1608,26 +2204,59 @@ jobs:
                           val oi = c.dequeueOutputBuffer(info, 10_000)
                           if (oi >= 0) {
                               idle = 0
-                              if (info.size > 0 && info.presentationTimeUs >= nextUs) {
+                              val pts = info.presentationTimeUs
+                              val sampleDue = pts >= nextUs
+                              if (info.size > 0 && (detect || sampleDue)) {
                                   val img = c.getOutputImage(oi)
-                                  val s = if (img != null) frameColor(img, acc) else null
-                                  if (img != null) img.close()
-                                  if (s == null) {
+                                  if (img == null || img.format != ImageFormat.YUV_420_888) {
                                       failed = true
                                       outDone = true
                                   } else {
-                                      // One slot per interval; a frame covers every slot up to its own time.
-                                      while (nextUs <= info.presentationTimeUs) {
-                                          out.write(s[0])
-                                          out.write(s[1])
-                                          out.write(s[2])
-                                          out.write(s[3])
-                                          nextUs += intervalUs
-                                      }
-                                      if (durUs > 0) {
-                                          onProgress((info.presentationTimeUs.toFloat() / durUs).coerceIn(0f, 1f))
+                                      val px = Px(img)
+                                      if (px.cw > 0 && px.ch > 0) {
+                                          if (detect) {
+                                              // Every frame: average brightness and color on a small grid.
+                                              var sy = 0f
+                                              var sr = 0f
+                                              var sg = 0f
+                                              var sb = 0f
+                                              for (j in 0 until 18) {
+                                                  for (i in 0 until 32) {
+                                                      px.read(i, j, 32, 18, tmp)
+                                                      sy += tmp[0]
+                                                      sr += tmp[1]
+                                                      sg += tmp[2]
+                                                      sb += tmp[3]
+                                                  }
+                                              }
+                                              val n = 576f
+                                              det.feed(pts, sy / n, sr / n, sg / n, sb / n)
+                                          }
+                                          if (sampleDue) {
+                                              // Once per slot: the scene color, on a finer grid.
+                                              acc.reset()
+                                              for (j in 0 until 36) {
+                                                  for (i in 0 until 64) {
+                                                      px.read(i, j, 64, 36, tmp)
+                                                      acc.add(tmp[1], tmp[2], tmp[3])
+                                                  }
+                                              }
+                                              val s = acc.result()
+                                              // One slot per interval; a frame covers every slot up to its own time.
+                                              while (nextUs <= pts) {
+                                                  out.write(s[0])
+                                                  out.write(s[1])
+                                                  out.write(s[2])
+                                                  out.write(s[3])
+                                                  nextUs += intervalUs
+                                              }
+                                              if (durUs > 0) {
+                                                  onProgress((pts.toFloat() / durUs).coerceIn(0f, 1f))
+                                              }
+                                          }
                                       }
                                   }
+                                  if (img != null) img.close()
                               }
                               c.releaseOutputBuffer(oi, false)
                               if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outDone = true
@@ -1639,7 +2268,7 @@ jobs:
 
                       if (Jobs.cancel || failed || out.size() == 0) return null
                       val dMs = maxOf(durUs / 1000, (out.size() / 4).toLong() * intervalMs)
-                      return Result(out.toByteArray(), dMs)
+                      return Result(out.toByteArray(), dMs, det.cues)
                   } finally {
                       try {
                           codec?.stop()
@@ -1651,41 +2280,6 @@ jobs:
                       }
                       ex.release()
                   }
-              }
-
-              /** Samples a grid of pixels from one decoded frame. Returns [r, g, b, brightness] or null if unsupported. */
-              private fun frameColor(img: Image, acc: Accum): IntArray? {
-                  if (img.format != ImageFormat.YUV_420_888) return null
-                  val crop = img.cropRect
-                  val cw = crop.width()
-                  val ch = crop.height()
-                  if (cw <= 0 || ch <= 0) return null
-                  val pY = img.planes[0]
-                  val pU = img.planes[1]
-                  val pV = img.planes[2]
-                  val bY = pY.buffer
-                  val bU = pU.buffer
-                  val bV = pV.buffer
-                  acc.reset()
-                  val gx = 64
-                  val gy = 36
-                  for (j in 0 until gy) {
-                      val y = crop.top + (j * ch + ch / 2) / gy
-                      for (i in 0 until gx) {
-                          val x = crop.left + (i * cw + cw / 2) / gx
-                          val yy = bY.get(minOf(y * pY.rowStride + x * pY.pixelStride, bY.limit() - 1)).toInt() and 0xFF
-                          val uu = bU.get(minOf((y / 2) * pU.rowStride + (x / 2) * pU.pixelStride, bU.limit() - 1)).toInt() and 0xFF
-                          val vv = bV.get(minOf((y / 2) * pV.rowStride + (x / 2) * pV.pixelStride, bV.limit() - 1)).toInt() and 0xFF
-                          val c = 1.164f * (yy - 16)
-                          val d = uu - 128
-                          val e = vv - 128
-                          val r = (c + 1.793f * e).toInt().coerceIn(0, 255)
-                          val g = (c - 0.213f * d - 0.533f * e).toInt().coerceIn(0, 255)
-                          val b = (c + 2.112f * d).toInt().coerceIn(0, 255)
-                          acc.add(r, g, b)
-                      }
-                  }
-                  return acc.result()
               }
           }
           EOF
@@ -1868,7 +2462,9 @@ jobs:
                       wl.acquire(6 * 60 * 60 * 1000L)
                       var lastNote = 0L
                       try {
-                          val r = Analyzer.run(this, uri, interval) { p ->
+                          val detect = Look.get(this, Look.K_DETECT) == 1
+                          val sens = Look.get(this, Look.K_SENS)
+                          val r = Analyzer.run(this, uri, interval, detect, sens) { p ->
                               Jobs.progress = p
                               val now = SystemClock.elapsedRealtime()
                               if (now - lastNote > 3000) {
@@ -1877,9 +2473,12 @@ jobs:
                               }
                           }
                           if (r != null) {
-                              Tracks.save(this, name, interval, r.durationMs, r.data)
+                              val id = Tracks.save(this, name, interval, r.durationMs, r.data)
+                              if (r.cues.isNotEmpty()) Tracks.saveCues(this, id, r.cues)
                               Jobs.libraryVersion++
-                              Jobs.message = "Saved \"$name\". Open Saved tracks below to use it."
+                              Jobs.message = "Saved \"$name\"." +
+                                  (if (detect) " Found ${r.cues.size} lightning/blast moment(s). Review them under Effects and cues." else "") +
+                                  " Open Saved tracks below to use it."
                           } else if (Jobs.cancel) {
                               Jobs.message = "Analysis cancelled."
                           } else {
@@ -1910,6 +2509,7 @@ jobs:
           import android.os.Handler
           import android.os.HandlerThread
           import android.os.IBinder
+          import android.os.SystemClock
 
           /** Movie lights: plays a saved color track onto the bulbs, following the clock in Player. */
           class PlayService : Service() {
@@ -1923,6 +2523,8 @@ jobs:
               private var handler: Handler? = null
               private var sender: Sender? = null
               private val buf = FloatArray(4)
+              private var lastP = -1L
+              private var tickN = 0
 
               override fun onBind(i: Intent?): IBinder? = null
 
@@ -1952,12 +2554,31 @@ jobs:
                       val pos = Player.position()
                       if (pos >= t.durationMs) {
                           Player.pause()
+                          lastP = -1L
                       } else {
-                          t.colorAt(pos, buf)
-                          s.send(buf[0], buf[1], buf[2], buf[3] / 255f)
+                          // Effects fire a little early to make up for network and bulb delay.
+                          val p = pos + 80L
+                          if (lastP < 0L || p < lastP || p - lastP > 400L) {
+                              // first tick, or the position jumped (seek): don't fire cues we skipped over
+                              lastP = p
+                          } else {
+                              for (c in Player.cues) {
+                                  if (c.ms > lastP && c.ms <= p) Effects.fire(this, c.kind, s)
+                              }
+                              lastP = p
+                          }
+
+                          // Colors go out every other tick (10 per second), and not while an effect is playing.
+                          tickN++
+                          if (tickN % 2 == 0 && SystemClock.elapsedRealtime() >= Effects.busyUntil) {
+                              t.colorAt(pos, buf)
+                              s.send(buf[0], buf[1], buf[2], buf[3] / 255f)
+                          }
                       }
+                  } else {
+                      lastP = -1L
                   }
-                  h.postDelayed({ tick(h, s) }, 100)
+                  h.postDelayed({ tick(h, s) }, 50)
               }
 
               override fun onDestroy() {
